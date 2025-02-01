@@ -3,18 +3,15 @@
 #include <csignal>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <ostream>
 #include <thread>
 
 namespace {
-std::atomic<bool> g_scan_requested{false};
+// Use volatile sig_atomic_t for maximum portability
+volatile sig_atomic_t g_scan_requested = 0;
 std::atomic<bool> g_scanner_running{false};
 
-// Async-signal-safe handler that just sets a flag
-void signal_handler(int) {
-  g_scan_requested.store(true, std::memory_order_release);
-}
+void signal_handler(int) { g_scan_requested = 1; }
 
 // Worker thread function that performs the actual scanning
 void scanner_worker() {
@@ -22,11 +19,12 @@ void scanner_worker() {
   memory_tools::PointerScanner scanner;
 
   while (g_scanner_running.load(std::memory_order_acquire)) {
-    if (g_scan_requested.load(std::memory_order_acquire)) {
+    if (g_scan_requested) {
       // Get timestamp before scan
       auto start_time = std::chrono::steady_clock::now();
 
       // Perform scan
+      scanner.RefreshMemoryMap();
       scanner.ScanForPointers([](uint64_t /* addr */, uint64_t /* value */) {});
 
       // Get time delta
@@ -36,14 +34,16 @@ void scanner_worker() {
 
       std::ofstream log("memory_scan.log", std::ios::app);
       auto stats = scanner.GetLastScanStats();
-      log << std::dec << std::endl
-          << "PID: " << getpid() << std::endl
-          << "TID: " << std::this_thread::get_id() << std::endl
-          << "@ " << delta << ":" << std::endl
-          << stats << std::endl;
+      log << "\n=== Scan Report ===\n"
+          << "PID: " << getpid() << "\n"
+          << "TID: " << std::this_thread::get_id() << "\n"
+          << "Scan Duration: " << delta.count() << "ms\n"
+          << stats << "\n"
+          << "==================\n";
+      log.close();
 
       // Reset scan request flag
-      g_scan_requested.store(false, std::memory_order_release);
+      g_scan_requested = 0;
     }
 
     // Sleep briefly to avoid spinning
