@@ -7,6 +7,7 @@
 #include <iostream>
 #include <ostream>
 #include <sys/mman.h>
+#include <thread>
 #include <unistd.h>
 
 #include <fstream>
@@ -91,27 +92,56 @@ bool PointerScanner::RefreshMemoryMap() {
       scan_regions_.push_back(region);
     }
 
+    // Apply stack padding when adding to target regions
+    if (region.mapping_name.find("[stack]") != std::string::npos) {
+      region.start_addr -= 1024 * 1024; // 1 MB Padding
+      region.start_addr += 1024 * 1024; // 1 MB Padding
+    }
     // All regions are potential targets
     target_regions_.push_back(region);
   }
+
+  // Sort regions by start address
+  std::sort(target_regions_.begin(), target_regions_.end(),
+            [](const MemoryRegion &a, const MemoryRegion &b) {
+              return a.start_addr < b.start_addr;
+            });
+
+  // Merge overlapping regions after sorting
+  if (!target_regions_.empty()) {
+    std::vector<MemoryRegion> merged;
+    merged.push_back(target_regions_[0]);
+
+    for (size_t i = 1; i < target_regions_.size(); ++i) {
+      MemoryRegion &last = merged.back();
+      const MemoryRegion &current = target_regions_[i];
+
+      if (last.end_addr >= current.start_addr) {
+        // Regions are overlaping, so merge them
+        last.end_addr = std::max(last.end_addr, current.end_addr);
+      } else {
+        merged.push_back(current);
+      }
+    }
+
+    target_regions_ = std::move(merged);
+  }
+
   return true;
 }
 
 bool PointerScanner::IsValidPointerTarget(uint64_t addr) const {
-  for (const auto &region : target_regions_) {
-    // If this is a stack region, add some padding
-    uint64_t start = region.start_addr;
-    uint64_t end = region.end_addr;
-    if (region.mapping_name.find("[stack]") != std::string::npos) {
-      // Add 1MB padding for stack growth
-      start -= 1024 * 1024;
-      end += 1024 * 1024;
-    }
-    if (addr >= start && addr < end) {
-      return true;
-    }
+  // Binary search for region containing addr
+  if (auto it =
+          std::lower_bound(target_regions_.begin(), target_regions_.end(), addr,
+                           [](const MemoryRegion &region, uint64_t addr) {
+                             return region.end_addr <= addr;
+                           });
+      it == target_regions_.end()) {
+    return false;
+  } else {
+    return addr >= it->start_addr && addr < it->end_addr;
   }
-  return false;
 }
 
 bool PointerScanner::IsLikelyPointer(uint64_t value) const {
@@ -138,14 +168,48 @@ bool PointerScanner::IsLikelyPointer(uint64_t value) const {
   return IsValidPointerTarget(value);
 }
 
+struct ScanContext {
+  sigjmp_buf jbuf;
+  ScanStats stats; // Per-thread stats
+};
+
+thread_local ScanContext scan_context;
+
+void SignalHandler(int) { siglongjmp(scan_context.jbuf, 1); }
+
+void PointerScanner::ScanRegion(const MemoryRegion &region,
+                                const PointerCallback &callback) {
+  uint64_t current_addr = region.start_addr;
+
+  // Track region
+  scan_context.stats.regions_scanned++;
+
+  while (current_addr < region.end_addr) {
+    if (sigsetjmp(scan_context.jbuf, 1) == 0) {
+      uint64_t value = *reinterpret_cast<volatile uint64_t *>(current_addr);
+      scan_context.stats.total_bytes_scanned += sizeof(uint64_t);
+
+      if (IsLikelyPointer(value)) {
+        callback(current_addr, value);
+        scan_context.stats.pointers_found++;
+      }
+      current_addr += sizeof(uint64_t);
+    } else {
+      // On SIGSEGV/SIGBUS, skip to next page
+      uint64_t next_addr = (current_addr + page_size_) & page_mask_;
+      scan_context.stats.bytes_skipped += (next_addr - current_addr);
+      current_addr = next_addr;
+    }
+  }
+}
+
 void PointerScanner::ScanForPointers(const PointerCallback &callback) {
   auto start_time = std::chrono::steady_clock::now();
   ResetStats();
 
   // Set uip signal handling once at the start
   struct sigaction sa, old_sa_segv, old_sa_bus;
-  static sigjmp_buf jbuf;
-  sa.sa_handler = [](int) { siglongjmp(jbuf, 1); };
+  sa.sa_handler = SignalHandler;
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = 0;
 
@@ -155,36 +219,41 @@ void PointerScanner::ScanForPointers(const PointerCallback &callback) {
     return;
   }
 
-  const uint64_t kAlignment = 8;
+  // const uint64_t kAlignment = 8;
 
-  for (const auto &region : scan_regions_) {
-    last_scan_stats_.regions_scanned++;
-    // Align up
-    uint64_t current_addr =
-        (region.start_addr + kAlignment - 1) & ~(kAlignment - 1);
-    // Align down
-    uint64_t region_end = region.end_addr & ~(kAlignment - 1);
+  const size_t num_threads = std::thread::hardware_concurrency();
+  std::vector<std::thread> threads;
+  std::mutex callback_mutex; // protect callback invocation
+  std::vector<ScanStats> thread_stats(num_threads);
 
-    while (current_addr < region_end) {
-      if (sigsetjmp(jbuf, 1) == 0) {
-        uint64_t value = *reinterpret_cast<volatile uint64_t *>(current_addr);
-        if (IsLikelyPointer(value)) {
-          callback(current_addr, value);
-          last_scan_stats_.pointers_found++;
-        }
-        last_scan_stats_.total_bytes_scanned += kMinimumAlignment;
-        current_addr += kMinimumAlignment;
-      } else {
-        // On SIGSEGV/SIGBUS, skip to next page
-        uint64_t next_page = (current_addr + page_size_) & page_mask_;
-        last_scan_stats_.bytes_skipped += (next_page - current_addr);
-        current_addr = next_page;
-        if (current_addr < region.start_addr || current_addr >= region_end) {
-          break;
-        }
+  for (size_t thread_id = 0; thread_id < num_threads; ++thread_id) {
+    threads.emplace_back([&, thread_id]() {
+      scan_context.stats = ScanStats{}; // Initialize thread's stats
+
+      for (size_t i = thread_id; i < scan_regions_.size(); i += num_threads) {
+        const auto &region = scan_regions_[i];
+        ScanRegion(region, [&](uint64_t addr, uint64_t value) {
+          std::lock_guard<std::mutex> lock(callback_mutex);
+          callback(addr, value);
+        });
       }
-    }
+
+      thread_stats[thread_id] = scan_context.stats; // Is this really needed?
+    });
   }
+
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  last_scan_stats_ = ScanStats{};
+  for (const auto &stats : thread_stats) {
+    last_scan_stats_.total_bytes_scanned += stats.total_bytes_scanned;
+    last_scan_stats_.regions_scanned += stats.regions_scanned;
+    last_scan_stats_.pointers_found += stats.pointers_found;
+    last_scan_stats_.bytes_skipped += stats.bytes_skipped;
+  }
+
   // Restore old signal handler
   sigaction(SIGSEGV, &old_sa_segv, nullptr);
   sigaction(SIGSEGV, &old_sa_bus, nullptr);

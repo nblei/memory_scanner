@@ -1,6 +1,7 @@
 #ifndef __POINTER_SCANNER_HH__
 #define __POINTER_SCANNER_HH__
 
+#include <csetjmp>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -73,8 +74,12 @@ private:
   // Regions that pointers might legitimately target.
   std::vector<MemoryRegion> target_regions_;
 
+  // Scans a single region for pointers
+  void ScanRegion(const MemoryRegion &region, const PointerCallback &callback);
+
   size_t page_size_;
   size_t page_mask_;
+  sigjmp_buf jbuf_;
 };
 
 } // namespace memory_tools
