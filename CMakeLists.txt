@@ -43,6 +43,15 @@ add_library(pointerscanner SHARED
         src/pointer_scanner.cc
         src/injector.cc
     )
+
+
+add_library(process_scanner SHARED
+    src/process_scanner.cc
+)
+target_include_directories(process_scanner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
+    )
+
 target_include_directories(pointerscanner PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
 )
@@ -80,6 +89,24 @@ write_basic_package_version_file(
     ${CMAKE_CURRENT_BINARY_DIR}/PointerScannerConfigVersion.cmake
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY SameMajorVersion
+)
+
+# Add test executables
+add_executable(target_process
+    examples/target_process.cc
+)
+
+add_executable(scanner_test
+    examples/process_scanner_example.cc
+)
+
+target_include_directories(scanner_test  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
+)
+
+target_link_libraries(scanner_test
+    PRIVATE
+        process_scanner
 )
 
 # Testing setup

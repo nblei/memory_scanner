@@ -45,14 +45,14 @@ public:
 
   // Updates internal memory map from /proc/self/maps
   // Returns false if maps couldn't be read.
-  bool RefreshMemoryMap();
+  virtual bool RefreshMemoryMap();
 
   // Test if a value is likely a valid pointer.
   // value: The potential pointer value to test.
   // Returns: true if value matches pointer heuristics.
   bool IsLikelyPointer(uint64_t value) const;
 
-private:
+protected:
   // Parse a single line from /proc/self/maps.
   // line: A line from /proc/self/maps file
   // Returns: Parameter for parsed region if parsing succeeds

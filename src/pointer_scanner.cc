@@ -179,7 +179,7 @@ void SignalHandler(int) { siglongjmp(scan_context.jbuf, 1); }
 
 void PointerScanner::ScanRegion(const MemoryRegion &region,
                                 const PointerCallback &callback) {
-  uint64_t current_addr = region.start_addr;
+  volatile uint64_t current_addr = region.start_addr;
 
   // Track region
   scan_context.stats.regions_scanned++;
