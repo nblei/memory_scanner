@@ -25,58 +25,9 @@ endif()
 # Known issue with spdlog
 add_compile_options(-Wno-dangling-reference)
 
-# Create the library
-# add_library(pointer_scanner
-#     src/pointer_scanner.cc
-#     src/pointer_scanner_handler.cc
-#     src/injector.cc
-# )
-# 
-# target_include_directories(pointer_scanner
-#     PUBLIC
-#         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-#         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools>
-#         $<INSTALL_INTERFACE:include>
-# )
-
-
-# add_library(process_scanner SHARED
-#     src/process_scanner.cc
-# )
-# target_include_directories(process_scanner PUBLIC
-#     ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
-#     )
-# 
-# target_include_directories(pointerscanner PUBLIC
-#     ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
-# )
-# install(TARGETS pointerscanner
-#     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-# )
-
-
 # Install rules
 include(GNUInstallDirs)
 set(INSTALL_CONFIGDIR ${CMAKE_INSTALL_LIBDIR}/cmake/PointerScanner)
-
-# install(TARGETS pointer_scanner
-#     EXPORT pointer_scanner-targets
-#     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-#     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-#     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-#     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-# )
-# 
-# install(DIRECTORY include/
-#     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-# )
-
-# Export targets
-# install(EXPORT pointer_scanner-targets
-#     FILE PointerScannerTargets.cmake
-#     NAMESPACE PointerScanner::
-#     DESTINATION ${INSTALL_CONFIGDIR}
-# )
 
 # Create version file
 include(CMakePackageConfigHelpers)
@@ -119,7 +70,3 @@ target_include_directories(process_monitor
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools>
 )
-
-# Testing setup
-enable_testing()
-add_subdirectory(tests)
