@@ -39,6 +39,7 @@ bool ProcessScanner::Attach() {
   }
 
   int status;
+
   if (waitpid(target_pid_, &status, 0) == -1) {
     std::cerr << "Failed to wait for process " << target_pid_ << ": "
               << strerror(errno) << std::endl;
@@ -50,6 +51,27 @@ bool ProcessScanner::Attach() {
     std::cerr << "Process did not stop as expected" << std::endl;
     ptrace(PTRACE_DETACH, target_pid_, nullptr, nullptr);
     return false;
+  } else {
+    if (WSTOPSIG(status) == SIGTRAP) {
+      // Handle exec's SIGTRAP
+      ptrace(PTRACE_CONT, target_pid_, &status, 0);
+      if (waitpid(target_pid_, &status, 0) == -1) {
+        std::cerr << "Failed to wait for process " << target_pid_ << ": "
+                  << strerror(errno) << std::endl;
+        ptrace(PTRACE_DETACH, target_pid_, nullptr, nullptr);
+        return false;
+      }
+      if (WIFSTOPPED(status)) {
+        if (WSTOPSIG(status) != SIGSTOP) {
+          std::cerr << "Unexpected stop signal" << std::endl;
+          return false;
+        }
+      } else {
+        std::cerr << "Process did not stop as expected" << std::endl;
+        ptrace(PTRACE_DETACH, target_pid_, nullptr, nullptr);
+        return false;
+      }
+    }
   }
 
   is_attached_ = true;
@@ -108,6 +130,8 @@ bool ProcessScanner::RefreshMemoryMap() {
   std::string maps_path = "/proc/" + std::to_string(target_pid_) + "/maps";
   std::ifstream maps(maps_path);
   if (!maps) {
+    std::cerr << "Failed to open " << maps_path << ": " << strerror(errno)
+              << std::endl;
     return false;
   }
 
@@ -118,43 +142,50 @@ bool ProcessScanner::RefreshMemoryMap() {
   while (std::getline(maps, line)) {
     std::istringstream iss(line);
     std::string addr_range, perms, offset, dev, inode;
-    std::string mapping_name;
 
-    if (!(iss >> addr_range >> perms >> offset >> dev >> inode)) {
+    if (!(iss >> addr_range >> perms)) {
+      std::cerr << "Failed to parse line: " << line << std::endl;
       continue;
     }
 
-    // Parse address range
     size_t dash_pos = addr_range.find('-');
     if (dash_pos == std::string::npos) {
+      std::cerr << "Invalid address range: " << addr_range << std::endl;
       continue;
     }
 
-    MemoryRegion region;
-    region.start_addr =
-        std::stoull(addr_range.substr(0, dash_pos), nullptr, 16);
-    region.end_addr = std::stoull(addr_range.substr(dash_pos + 1), nullptr, 16);
+    try {
+      MemoryRegion region;
+      region.start_addr =
+          std::stoull(addr_range.substr(0, dash_pos), nullptr, 16);
+      region.end_addr =
+          std::stoull(addr_range.substr(dash_pos + 1), nullptr, 16);
+      region.is_readable = (perms[0] == 'r');
+      region.is_writable = (perms[1] == 'w');
+      region.is_executable = (perms[2] == 'x');
 
-    // Parse permissions
-    region.is_readable = (perms[0] == 'r');
-    region.is_writable = (perms[1] == 'w');
-    region.is_executable = (perms[2] == 'x');
+      // Skip the offset, device, and inode
+      iss >> offset >> dev >> inode;
 
-    // Get mapping name (rest of the line)
-    std::getline(iss, mapping_name);
-    // Some entries might not have a mapping name
-    size_t first = mapping_name.find_first_not_of(" \t");
-    if (first != std::string::npos) {
-      region.mapping_name = mapping_name.substr(first);
-    } else {
-      region.mapping_name = "";
+      // Get mapping name (rest of the line)
+      std::getline(iss, region.mapping_name);
+      if (!region.mapping_name.empty()) {
+        size_t first = region.mapping_name.find_first_not_of(" \t");
+        if (first != std::string::npos) {
+          region.mapping_name = region.mapping_name.substr(first);
+        }
+      }
+
+      if (region.is_readable) {
+        scan_regions_.push_back(region);
+      }
+      target_regions_.push_back(region);
+
+    } catch (const std::exception &e) {
+      std::cerr << "Error parsing line '" << line << "': " << e.what()
+                << std::endl;
+      continue;
     }
-
-    // Add to appropriate region lists
-    if (region.is_readable) {
-      scan_regions_.push_back(region);
-    }
-    target_regions_.push_back(region);
   }
 
   return !scan_regions_.empty();

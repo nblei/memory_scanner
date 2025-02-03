@@ -22,66 +22,61 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
+# Known issue with spdlog
+add_compile_options(-Wno-dangling-reference)
+
 # Create the library
-add_library(pointer_scanner
-    src/pointer_scanner.cc
-    src/pointer_scanner_handler.cc
-    src/injector.cc
-)
-
-target_include_directories(pointer_scanner
-    PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools>
-        $<INSTALL_INTERFACE:include>
-)
-
-# Create example executable
-add_executable(scanner_example examples/scanner_example.cc)
-target_link_libraries(scanner_example PRIVATE pointer_scanner)
-add_library(pointerscanner SHARED
-        src/pointer_scanner.cc
-        src/injector.cc
-    )
+# add_library(pointer_scanner
+#     src/pointer_scanner.cc
+#     src/pointer_scanner_handler.cc
+#     src/injector.cc
+# )
+# 
+# target_include_directories(pointer_scanner
+#     PUBLIC
+#         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+#         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools>
+#         $<INSTALL_INTERFACE:include>
+# )
 
 
-add_library(process_scanner SHARED
-    src/process_scanner.cc
-)
-target_include_directories(process_scanner PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
-    )
-
-target_include_directories(pointerscanner PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
-)
-install(TARGETS pointerscanner
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
+# add_library(process_scanner SHARED
+#     src/process_scanner.cc
+# )
+# target_include_directories(process_scanner PUBLIC
+#     ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
+#     )
+# 
+# target_include_directories(pointerscanner PUBLIC
+#     ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
+# )
+# install(TARGETS pointerscanner
+#     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+# )
 
 
 # Install rules
 include(GNUInstallDirs)
 set(INSTALL_CONFIGDIR ${CMAKE_INSTALL_LIBDIR}/cmake/PointerScanner)
 
-install(TARGETS pointer_scanner
-    EXPORT pointer_scanner-targets
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-
-install(DIRECTORY include/
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
+# install(TARGETS pointer_scanner
+#     EXPORT pointer_scanner-targets
+#     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+#     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+#     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+#     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+# )
+# 
+# install(DIRECTORY include/
+#     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+# )
 
 # Export targets
-install(EXPORT pointer_scanner-targets
-    FILE PointerScannerTargets.cmake
-    NAMESPACE PointerScanner::
-    DESTINATION ${INSTALL_CONFIGDIR}
-)
+# install(EXPORT pointer_scanner-targets
+#     FILE PointerScannerTargets.cmake
+#     NAMESPACE PointerScanner::
+#     DESTINATION ${INSTALL_CONFIGDIR}
+# )
 
 # Create version file
 include(CMakePackageConfigHelpers)
@@ -91,22 +86,38 @@ write_basic_package_version_file(
     COMPATIBILITY SameMajorVersion
 )
 
-# Add test executables
-add_executable(target_process
-    examples/target_process.cc
+include(FetchContent)
+
+# Fetch spdlog
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG v1.13.0
 )
 
-add_executable(scanner_test
-    examples/process_scanner_example.cc
+# Fetch CLI11
+FetchContent_Declare(
+    cli11
+    GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+    GIT_TAG v2.3.2
 )
 
-target_include_directories(scanner_test  PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools
+FetchContent_MakeAvailable(spdlog cli11)
+
+add_executable(process_monitor
+    src/process_scanner.cc
+    src/process_monitor.cc
 )
 
-target_link_libraries(scanner_test
+target_link_libraries(process_monitor
     PRIVATE
-        process_scanner
+        CLI11::CLI11
+        spdlog::spdlog
+)
+
+target_include_directories(process_monitor
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools>
 )
 
 # Testing setup
