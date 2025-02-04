@@ -220,7 +220,8 @@ bool ProcessScanner::IsLikelyPointer(uint64_t value) const {
   return IsValidPointerTarget(value);
 }
 
-void ProcessScanner::ScanForPointers(const PointerCallback &callback) {
+void ProcessScanner::ScanForPointers(const PointerCallback &is_pointer,
+                                     const PointerCallback &is_not_pointer) {
   if (!is_attached_) {
     throw std::runtime_error("Not attached to target process");
   }
@@ -248,11 +249,22 @@ void ProcessScanner::ScanForPointers(const PointerCallback &callback) {
           std::memcpy(&value, buffer.data() + offset, sizeof(uint64_t));
 
           if (IsLikelyPointer(value)) {
-            callback(current_addr + offset, value);
+            if (is_pointer != nullptr)
+              is_pointer(current_addr + offset, value);
             last_scan_stats_.pointers_found++;
+          } else {
+            if (is_not_pointer != nullptr)
+              is_not_pointer(current_addr + offset, value);
           }
         }
         last_scan_stats_.total_bytes_scanned += to_read;
+        last_scan_stats_.bytes_readable += to_read;
+        if (region.is_writable) {
+          last_scan_stats_.bytes_writable += to_read;
+        }
+        if (region.is_executable) {
+          last_scan_stats_.bytes_writable += to_read;
+        }
       }
       current_addr += to_read;
     }

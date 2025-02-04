@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <sys/types.h>
@@ -21,21 +22,39 @@ struct MemoryRegion {
 
 struct ScanStats {
   uint64_t total_bytes_scanned{0};
+  uint64_t bytes_readable{0};
+  uint64_t bytes_writable{0};
+  uint64_t bytes_executable{0};
   uint64_t regions_scanned{0};
   uint64_t pointers_found{0};
   uint64_t bytes_skipped{0};
   int64_t scan_time_ms{0};
   friend std::ostream &operator<<(std::ostream &os, const ScanStats &stats) {
+    double percent =
+        100. * (sizeof(uintptr_t) * static_cast<double>(stats.pointers_found)) /
+        static_cast<double>(stats.bytes_readable - stats.bytes_executable);
     os << "Scan Statistics:\n"
-       << std::dec << "  Regions scanned:     " << stats.regions_scanned << "\n"
-       << "  Total bytes scanned: " << stats.total_bytes_scanned << " ("
+       << std::dec << "  Regions scanned:         " << stats.regions_scanned
+       << "\n"
+       << "  Total bytes scanned:     " << stats.total_bytes_scanned << " ("
        << (static_cast<double>(stats.total_bytes_scanned) / (1024.0 * 1024.0))
        << " MB)\n"
-       << "  Bytes skipped:       " << stats.bytes_skipped << " ("
+       << "  Readable bytes:          " << stats.bytes_readable << " ("
+       << (static_cast<double>(stats.bytes_readable) / (1024.0 * 1024.0))
+       << " MB)\n"
+       << "  Writable bytes:          " << stats.bytes_writable << " ("
+       << (static_cast<double>(stats.bytes_writable) / (1024.0 * 1024.0))
+       << " MB)\n"
+       << "  Executable bytes:        " << stats.bytes_executable << " ("
+       << (static_cast<double>(stats.bytes_executable) / (1024.0 * 1024.0))
+       << " MB)\n"
+       << "  Bytes skipped:           " << stats.bytes_skipped << " ("
        << (static_cast<double>(stats.bytes_skipped) / (1024.0 * 1024.0))
        << " MB)\n"
-       << "  Pointers found:      " << stats.pointers_found << "\n"
-       << "  Scan time:           " << stats.scan_time_ms << " ms";
+       << "  Pointers found:          " << stats.pointers_found << "\n"
+       << "  Pointers as % of memory: " << std::setprecision(2) << percent
+       << "%\n"
+       << "  Scan time:               " << stats.scan_time_ms << " ms";
     return os;
   }
 };
@@ -54,7 +73,8 @@ public:
   // Core functionality
   bool Attach();
   bool Detach();
-  void ScanForPointers(const PointerCallback &callback);
+  void ScanForPointers(const PointerCallback &is_pointer = nullptr,
+                       const PointerCallback &not_pointer = nullptr);
 
   // Statistics
   const ScanStats &GetLastScanStats() const { return last_scan_stats_; }

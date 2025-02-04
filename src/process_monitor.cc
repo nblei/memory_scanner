@@ -30,46 +30,81 @@ void setup_signal_handlers() {
   sigaction(SIGTERM, &sa, nullptr);
 }
 
-struct ScannerOptions {
-  bool verbose{false};
-  unsigned interval{0};
-  std::string log_file;
-  std::vector<std::string> program_args;
-  spdlog::level::level_enum log_level{spdlog::level::info};
+struct CommonOptions;
+struct RunOnceOptions;
+struct RunPeriodicOptions;
+
+// Abstract base class for monitoring strategies.
+class MonitoringStrategy {
+public:
+  virtual ~MonitoringStrategy() = default;
+  virtual void before_monitoring() = 0;
+  virtual bool should_continue() = 0;
+  virtual void after_scan() = 0;
 };
 
-// std::string get_timestamp() {
-//   auto now = std::chrono::system_clock::now();
-//   auto time = std::chrono::system_clock::to_time_t(now);
-//   std::stringstream ss;
-//   ss << std::put_time(std::localtime(&time), "%Y%m%d_%H%M%S");
-//   return ss.str();
-// }
+// Strategy for single scan with delay
+class SingleScanStrategy : public MonitoringStrategy {
+  unsigned delay_ms_;
+  bool scan_completed_ = false;
 
-void monitor_process(pid_t child_pid, unsigned interval) {
+public:
+  explicit SingleScanStrategy(unsigned delay_ms) : delay_ms_(delay_ms) {}
+
+  void before_monitoring() override {
+    spdlog::info("Waiting {}ms before scanning", delay_ms_);
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
+  }
+
+  bool should_continue() override { return !scan_completed_; }
+
+  void after_scan() override { scan_completed_ = true; }
+};
+
+// Strategy for periodic scanning
+class PeriodicScanStrategy : public MonitoringStrategy {
+  unsigned interval_ms_;
+
+public:
+  explicit PeriodicScanStrategy(unsigned interval_ms)
+      : interval_ms_(interval_ms) {}
+
+  void before_monitoring() override {
+    spdlog::info("Starting periodic scan with {}ms interval", interval_ms_);
+  }
+
+  bool should_continue() override { return !g_should_exit; }
+
+  void after_scan() override {
+    std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+  }
+};
+
+// Core monitoring function used by both modes
+bool monitor_process_core(pid_t child_pid, MonitoringStrategy &strategy) {
   try {
     memory_tools::ProcessScanner scanner(child_pid);
+    strategy.before_monitoring();
 
     // Open log file for scan results
-
     spdlog::info("Monitoring process {}", child_pid);
 
-    while (!g_should_exit) {
+    while (strategy.should_continue()) {
       // Check if child is still running
       int status;
       pid_t result = waitpid(child_pid, &status, WNOHANG);
       if (result == -1) {
         spdlog::error("Error checking child process: {}", strerror(errno));
-        break;
+        return false;
       } else if (result > 0) {
         spdlog::info("Child process terminated");
-        break;
+        return false;
       }
 
       // Perform scan
       if (!scanner.Attach()) {
         spdlog::error("Failed to attach to process");
-        break;
+        return false;
       }
 
       scanner.ScanForPointers([](uint64_t addr, uint64_t value) {
@@ -83,20 +118,44 @@ void monitor_process(pid_t child_pid, unsigned interval) {
       spdlog::info(ss.str());
 
       scanner.Detach();
-
-      // Wait before next scan
-      if (interval == 0) {
-        break;
-      } else {
-        std::this_thread::sleep_for(std::chrono::milliseconds(interval));
-      }
+      strategy.after_scan();
     }
+
+    return true;
   } catch (const std::exception &e) {
     spdlog::error("Error in monitor: {}", e.what());
+    return false;
   }
 }
 
-void setup_logging(const ScannerOptions &options) {
+// Wrapper functions for different monitoring modes
+void monitor_process_once(pid_t child_pid, unsigned delay_ms) {
+  SingleScanStrategy strategy(delay_ms);
+  monitor_process_core(child_pid, strategy);
+}
+
+void monitor_process_periodic(pid_t child_pid, unsigned delay_ms) {
+  PeriodicScanStrategy strategy(delay_ms);
+  monitor_process_core(child_pid, strategy);
+}
+
+struct CommonOptions {
+  bool verbose{false};
+  std::string log_file;
+  std::string program_name;
+  std::vector<std::string> program_args;
+  spdlog::level::level_enum log_level{spdlog::level::info};
+};
+
+struct RunOnceOptions : CommonOptions {
+  unsigned delay_ms{1000};
+};
+
+struct RunPeriodicOptions : CommonOptions {
+  unsigned interval_ms{1000};
+};
+
+void setup_logging(const CommonOptions &options) {
   try {
     std::vector<spdlog::sink_ptr> sinks;
 
@@ -119,8 +178,10 @@ void setup_logging(const ScannerOptions &options) {
     spdlog::set_default_logger(logger);
     spdlog::set_level(options.log_level);
 
-    std::string prog_msg =
-        "Starting memory scanner for program: " + options.program_args[0];
+    std::string prog_msg = "Starting memory scanner for program:";
+    for (const auto &arg : options.program_args) {
+      prog_msg += " " + arg;
+    }
     spdlog::info(prog_msg);
   } catch (const spdlog::spdlog_ex &ex) {
     std::cerr << "Logger initialization failed: " << ex.what() << std::endl;
@@ -128,29 +189,16 @@ void setup_logging(const ScannerOptions &options) {
   }
 }
 
-} // namespace
-
-int main(int argc, char *argv[]) {
-  ScannerOptions options;
-
-  CLI::App app{"Process Monitor - analyzes process memory for pointers"};
-
-  // Add CLI options
-  app.add_flag("-v,--verbose", options.verbose,
-               "Enable verbose console output");
-
-  app.add_option("-i,--interval", options.interval,
-                 "Scan interval in milliseconds (0 for single scan)")
-      ->check(CLI::TypeValidator<unsigned>())
-      ->default_val(1000);
-
-  app.add_option("-l,--log-file", options.log_file, "Log file path")
+template <typename Options>
+void add_common_options(CLI::App *app, Options &options) {
+  app->add_flag("-v,--verbose", options.verbose,
+                "Enable verbose console output");
+  app->add_option("-l,--log-file", options.log_file, "Log file path")
       ->default_val("memory_scanner.log");
 
-  std::string level_str = "info";
-  app.add_option("--log-level", level_str,
-                 "Log level (trace, debug, info, warn, error, critical)")
-      ->default_val("info")
+  app->add_option("--log-level", options.log_level,
+                  "Log level (trace, debug, info, warn, error, critical)")
+      ->default_val(spdlog::level::info)
       ->transform(CLI::CheckedTransformer(
           std::map<std::string, spdlog::level::level_enum>{
               {"trace", spdlog::level::trace},
@@ -161,11 +209,40 @@ int main(int argc, char *argv[]) {
               {"critical", spdlog::level::critical}},
           CLI::ignore_case));
 
-  // Program and its arguments
-  app.add_option("program", options.program_args,
-                 "Program to scan and its arguments")
-      ->required()
-      ->expected(-1); // Accept unlimited arguments after program
+  // Create a special option group for the program and its arguments
+  app->add_option("Program", options.program_name, "Program to monitor")
+      ->check(CLI::ExistingFile)
+      ->required();
+}
+} // namespace
+
+int main(int argc, char *argv[]) {
+  // Main program setup
+  CLI::App app{"Process Monitor - analyzes process memory for pointers"};
+  app.require_subcommand(1, 1);
+  app.allow_extras();
+
+  auto run_once = app.add_subcommand("once", "Run a single scan after a delay");
+  auto run_periodic = app.add_subcommand("periodic", "Run periodic scans");
+
+  RunOnceOptions once_opts;
+  RunPeriodicOptions periodic_opts;
+
+  add_common_options(run_once, once_opts);
+  run_once
+      ->add_option("-d,--delay", once_opts.delay_ms,
+                   "Delay before scanning (milliseconds)")
+      ->default_val(1000)
+      ->check(CLI::PositiveNumber);
+
+  add_common_options(run_periodic, periodic_opts);
+  run_periodic
+      ->add_option("-i,--interval", periodic_opts.interval_ms,
+                   "Scan interval in milliseconds")
+      ->default_val(1000)
+      ->check(CLI::PositiveNumber);
+
+  app.require_subcommand(1, 1); // Exactly one subcommand required
 
   try {
     app.parse(argc, argv);
@@ -173,33 +250,49 @@ int main(int argc, char *argv[]) {
     return app.exit(e);
   }
 
+  CommonOptions &active_opts =
+      run_once->parsed() ? static_cast<CommonOptions &>(once_opts)
+                         : static_cast<CommonOptions &>(periodic_opts);
+
+  active_opts.program_args = app.remaining();
+
   setup_signal_handlers();
-  setup_logging(options);
+  setup_logging(active_opts);
 
   pid_t child_pid = fork();
   if (child_pid == -1) {
-    std::cerr << "Fork failed: " << strerror(errno) << "\n";
-    exit(1);
+    spdlog::error("Fork failed: {}", strerror(errno));
+    return 1;
   }
 
   if (child_pid == 0) {
     // Child process
     std::vector<char *> exec_args;
-    for (auto &arg : options.program_args) {
-      exec_args.push_back(arg.data());
+
+    // Convert all program arguments to char* for execvp
+    exec_args.push_back(const_cast<char *>(active_opts.program_name.c_str()));
+    for (const auto &arg : active_opts.program_args) {
+      exec_args.push_back(const_cast<char *>(arg.c_str()));
     }
+    exec_args.push_back(nullptr); // Required null terminator
+
     execvp(exec_args[0], exec_args.data());
-    std::cerr << "Exec failed: " << strerror(errno) << "\n";
+    spdlog::error("Exec failed: {}", strerror(errno));
     exit(1);
   }
-  // Parent process
-  monitor_process(child_pid, options.interval);
 
-  // Ensure child is terminated
-  spdlog::info("Killing child");
+  // Parent process
+  if (run_once->parsed()) {
+    monitor_process_once(child_pid, once_opts.delay_ms);
+  } else {
+    monitor_process_periodic(child_pid, periodic_opts.interval_ms);
+  }
+
+  // Cleanup
+  spdlog::info("Killing child process");
   kill(child_pid, SIGKILL);
   waitpid(child_pid, nullptr, 0);
-  spdlog::info("Child killed");
+  spdlog::info("Child process terminated");
   spdlog::info("Monitoring complete");
 
   return 0;

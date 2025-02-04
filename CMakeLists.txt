@@ -70,3 +70,5 @@ target_include_directories(process_monitor
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools>
 )
+
+add_subdirectory(examples)
