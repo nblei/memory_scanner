@@ -1,10 +1,9 @@
+#include "error_injection.hh"
 #include "process_scanner.hh"
 #include <CLI/CLI.hpp>
 #include <chrono>
 #include <cstring>
 #include <ctime>
-#include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <signal.h>
 #include <spdlog/fmt/ostr.h>
@@ -30,7 +29,18 @@ void setup_signal_handlers() {
   sigaction(SIGTERM, &sa, nullptr);
 }
 
-struct CommonOptions;
+struct CommonOptions {
+  bool verbose{false};
+  std::string log_file;
+  std::string program_name;
+  std::vector<std::string> program_args;
+  memory_tools::ErrorType error_type{memory_tools::ErrorType::BitFlip};
+  double pointer_error_rate{0.0};
+  double non_pointer_error_rate{0.0};
+  size_t error_limit{std::numeric_limits<size_t>::max()};
+  uint64_t error_seed{0};
+  spdlog::level::level_enum log_level{spdlog::level::info};
+};
 struct RunOnceOptions;
 struct RunPeriodicOptions;
 
@@ -81,7 +91,11 @@ public:
 };
 
 // Core monitoring function used by both modes
-bool monitor_process_core(pid_t child_pid, MonitoringStrategy &strategy) {
+bool monitor_process_core(pid_t child_pid, MonitoringStrategy &strategy,
+                          const CommonOptions &options) {
+  memory_tools::ErrorInjectionStrategy injection_strategy(
+      options.error_type, options.pointer_error_rate,
+      options.non_pointer_error_rate, options.error_limit, options.error_seed);
   try {
     memory_tools::ProcessScanner scanner(child_pid);
     strategy.before_monitoring();
@@ -107,11 +121,7 @@ bool monitor_process_core(pid_t child_pid, MonitoringStrategy &strategy) {
         return false;
       }
 
-      scanner.ScanForPointers([](uint64_t addr, uint64_t value) {
-        (void)addr;
-        (void)value;
-        // logfile << std::hex << "0x" << addr << " -> 0x" << value << "\n";
-      });
+      scanner.ScanForPointers(injection_strategy);
 
       std::stringstream ss;
       ss << scanner.GetLastScanStats();
@@ -129,23 +139,17 @@ bool monitor_process_core(pid_t child_pid, MonitoringStrategy &strategy) {
 }
 
 // Wrapper functions for different monitoring modes
-void monitor_process_once(pid_t child_pid, unsigned delay_ms) {
+void monitor_process_once(pid_t child_pid, unsigned delay_ms,
+                          const CommonOptions &options) {
   SingleScanStrategy strategy(delay_ms);
-  monitor_process_core(child_pid, strategy);
+  monitor_process_core(child_pid, strategy, options);
 }
 
-void monitor_process_periodic(pid_t child_pid, unsigned delay_ms) {
+void monitor_process_periodic(pid_t child_pid, unsigned delay_ms,
+                              const CommonOptions &options) {
   PeriodicScanStrategy strategy(delay_ms);
-  monitor_process_core(child_pid, strategy);
+  monitor_process_core(child_pid, strategy, options);
 }
-
-struct CommonOptions {
-  bool verbose{false};
-  std::string log_file;
-  std::string program_name;
-  std::vector<std::string> program_args;
-  spdlog::level::level_enum log_level{spdlog::level::info};
-};
 
 struct RunOnceOptions : CommonOptions {
   unsigned delay_ms{1000};
@@ -208,6 +212,35 @@ void add_common_options(CLI::App *app, Options &options) {
               {"error", spdlog::level::err},
               {"critical", spdlog::level::critical}},
           CLI::ignore_case));
+
+  // Add to add_common_options function:
+  app->add_option("--error-type", options.error_type,
+                  "Error injection type (bitflip, stuck at zero, stuck at one)")
+      ->transform(CLI::CheckedTransformer(
+          std::map<std::string, memory_tools::ErrorType>{
+              {"bitflip", memory_tools::ErrorType::BitFlip},
+              {"zero", memory_tools::ErrorType::StuckAtZero},
+              {"one", memory_tools::ErrorType::StuckAtOne}},
+          CLI::ignore_case));
+
+  app->add_option("--pointer-error-rate", options.pointer_error_rate,
+                  "Error injection rate (0.0-1.0)")
+      ->default_val(0.)
+      ->check(CLI::Range(0.0, 1.0));
+
+  app->add_option("--non-pointer-error-rate", options.non_pointer_error_rate,
+                  "Error injection rate (0.0-1.0)")
+      ->default_val(0.)
+      ->check(CLI::Range(0.0, 1.0));
+
+  app->add_option("--error-limit", options.error_limit,
+                  "Maximum number of errors to inject")
+      ->default_val(std::numeric_limits<size_t>::max())
+      ->check(CLI::PositiveNumber);
+
+  app->add_option("--error-seed", options.error_seed,
+                  "RNG seed for error injection (0 for random)")
+      ->default_val(0);
 
   // Create a special option group for the program and its arguments
   app->add_option("Program", options.program_name, "Program to monitor")
@@ -283,9 +316,9 @@ int main(int argc, char *argv[]) {
 
   // Parent process
   if (run_once->parsed()) {
-    monitor_process_once(child_pid, once_opts.delay_ms);
+    monitor_process_once(child_pid, once_opts.delay_ms, active_opts);
   } else {
-    monitor_process_periodic(child_pid, periodic_opts.interval_ms);
+    monitor_process_periodic(child_pid, periodic_opts.interval_ms, active_opts);
   }
 
   // Cleanup

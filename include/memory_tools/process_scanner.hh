@@ -2,7 +2,6 @@
 #define __PROCESS_SCANNER_HH__
 
 #include <cstdint>
-#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -17,7 +16,26 @@ struct MemoryRegion {
   bool is_readable;
   bool is_writable;
   bool is_executable;
+  bool is_private;
   std::string mapping_name; // e.g., "[heap]", "[stack]", etc.
+};
+
+struct InjectionStrategy {
+  virtual bool PreRunner() { return true; };
+  virtual bool HandlePointer(uint64_t addr, uint64_t &value, bool writable) {
+    (void)addr;
+    (void)value;
+    (void)writable;
+    return false;
+  }
+  virtual bool HandleNonPointer(uint64_t addr, uint64_t &value, bool writable) {
+    (void)addr;
+    (void)value;
+    (void)writable;
+    return false;
+  }
+  virtual bool PostRunner() { return true; }
+  virtual void SetCurrentRegion(const MemoryRegion & /* region */) {}
 };
 
 struct ScanStats {
@@ -61,8 +79,6 @@ struct ScanStats {
 
 class ProcessScanner {
 public:
-  using PointerCallback = std::function<void(uint64_t addr, uint64_t value)>;
-
   explicit ProcessScanner(pid_t target_pid);
   ~ProcessScanner();
 
@@ -73,8 +89,7 @@ public:
   // Core functionality
   bool Attach();
   bool Detach();
-  void ScanForPointers(const PointerCallback &is_pointer = nullptr,
-                       const PointerCallback &not_pointer = nullptr);
+  void ScanForPointers(InjectionStrategy &);
 
   // Statistics
   const ScanStats &GetLastScanStats() const { return last_scan_stats_; }
@@ -83,6 +98,7 @@ public:
 private:
   // Memory reading functions
   bool ReadMemory(uint64_t addr, void *buffer, size_t size);
+  bool WriteMemory(uint64_t addr, const void *buffer, size_t size);
   bool RefreshMemoryMap();
   bool IsValidPointerTarget(uint64_t addr) const;
   bool IsLikelyPointer(uint64_t value) const;
