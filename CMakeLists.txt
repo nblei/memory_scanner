@@ -58,8 +58,11 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(spdlog cli11)
 
 add_executable(process_monitor
-    src/process_scanner.cc
-    src/process_monitor.cc
+    ./src/process_base.cc
+    ./src/process_scanner.cc
+    ./src/monitor_interface.cc
+    ./src/process_checkpoint.cc
+    ./src/process_monitor.cc
 )
 
 target_link_libraries(process_monitor

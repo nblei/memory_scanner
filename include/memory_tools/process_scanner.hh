@@ -5,24 +5,10 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
-#include <string>
 #include <sys/types.h>
-#include <thread>
 #include <vector>
 
 namespace memory_tools {
-
-struct MemoryRegion {
-  uint64_t start_addr;
-  uint64_t end_addr;
-  bool is_readable;
-  bool is_writable;
-  bool is_executable;
-  bool is_private;
-  std::string mapping_name; // e.g., "[heap]", "[stack]", etc.
-  bool operator<(const MemoryRegion &other) const;
-  bool contains(uintptr_t addr) const;
-};
 
 struct InjectionStrategy {
   virtual bool PreRunner() { return true; };
@@ -88,20 +74,13 @@ public:
   ProcessScanner(pid_t target_pid, size_t num_threads = 4);
 
   // Core Scanning functionality
-  void ScanForPointers(InjectionStrategy& strategy);
+  void ScanForPointers(InjectionStrategy &strategy);
 
   // Statistics
   const ScanStats &GetLastScanStats() const { return last_scan_stats_; }
   void ResetStats() { last_scan_stats_ = ScanStats(); }
 
 private:
-  // Memory reading functions
-  bool ReadMemory(uint64_t addr, void *buffer, size_t size);
-  bool WriteMemory(uint64_t addr, const void *buffer, size_t size);
-  bool RefreshMemoryMap();
-  bool IsValidPointerTarget(uint64_t addr) const;
-  bool IsLikelyPointer(uint64_t value) const;
-
   // For prallel processing
   void ScanRegion(const MemoryRegion &region, InjectionStrategy &strategy,
                   ScanStats &local_stats);
