@@ -6,6 +6,7 @@
 #include "spdlog/spdlog.h"
 #include <chrono>
 #include <random>
+#include <shared_mutex>
 
 namespace memory_tools {
 
@@ -32,7 +33,9 @@ struct ValueChange {
 
 class ErrorInjectionStrategy : public InjectionStrategy {
 public:
-  struct RegionQuota {
+  class RegionQuota {
+  private:
+    mutable std::shared_mutex rw_lock_;
     size_t heap_errors{0};
     size_t stack_errors{0};
     size_t static_errors{0};
@@ -44,7 +47,11 @@ public:
     size_t static_quota{0};
     size_t wildcard_quota{0};
 
+    friend ErrorInjectionStrategy;
+
+  public:
     bool Available(PointerType type) const {
+      rw_lock_.lock_shared();
       bool wildcard_avail = wildcard_errors < wildcard_quota;
       switch (type) {
       case PointerType::Heap:
@@ -56,9 +63,11 @@ public:
       default:
         return false;
       }
+      rw_lock_.unlock_shared();
     }
 
     void Increment(PointerType type) {
+      rw_lock_.lock();
       switch (type) {
       case PointerType::Heap:
         if (heap_quota == heap_errors) {
@@ -84,6 +93,7 @@ public:
       default:
         break;
       }
+      rw_lock_.unlock();
     }
   };
   static constexpr size_t g_bits_per_byte = 8;
@@ -107,41 +117,45 @@ public:
   }
 
   void SetCurrentRegion(const MemoryRegion &region) override {
-    current_region_ = &region;
+    current_region = &region;
   }
 
   bool PreRunner() override { return true; }
 
-  bool HandlePointer(uint64_t addr, uint64_t &value, bool writable) override {
-    return inject_error(pointer_error_rate_, quota_, addr, value, writable);
+  bool HandlePointer(uint64_t addr, uint64_t &value, bool writable,
+                     const MemoryRegion &current_region) override {
+    return inject_error(pointer_error_rate_, quota_, addr, value, writable,
+                        current_region);
   }
 
-  bool HandleNonPointer(uint64_t addr, uint64_t &value,
-                        bool writable) override {
-    return inject_error(non_pointer_error_rate_, quota_, addr, value, writable);
+  bool HandleNonPointer(uint64_t addr, uint64_t &value, bool writable,
+                        const MemoryRegion &current_region) override {
+    return inject_error(non_pointer_error_rate_, quota_, addr, value, writable,
+                        current_region);
   }
 
   bool PostRunner() override { return true; }
 
 private:
-  PointerType determine_pointer_type() const {
-    if (!current_region_ || current_region_->mapping_name.empty()) {
+  PointerType determine_pointer_type(const MemoryRegion &current_region) const {
+    if (current_region.mapping_name.empty()) {
       spdlog::debug("No region or empty mapping name");
       return PointerType::Unknown;
     }
 
-    if (current_region_->mapping_name.find("[heap]") != std::string::npos) {
+    if (current_region.mapping_name.find("[heap]") != std::string::npos) {
       return PointerType::Heap;
     }
-    if (current_region_->mapping_name.find("[stack]") != std::string::npos) {
+    if (current_region.mapping_name.find("[stack]") != std::string::npos) {
       return PointerType::Stack;
     }
     return PointerType::Static;
   }
 
   bool inject_error(double rate, RegionQuota &quota, uint64_t addr,
-                    uint64_t &value, bool writable) {
-    auto type = determine_pointer_type();
+                    uint64_t &value, bool writable,
+                    const MemoryRegion &current_region) {
+    auto type = determine_pointer_type(current_region);
     if (!writable || dist_(rng_) > rate || !quota.Available(type)) {
       return false;
     }
@@ -163,7 +177,7 @@ private:
         old_value,
         value,
         type,
-        current_region_ ? current_region_->mapping_name : "unknown",
+        current_region.mapping_name,
         std::chrono::steady_clock::now(),
     };
     spdlog::info("Injected {} error in {} region at {:#x}: {:#x} -> {:#x}",
@@ -171,8 +185,7 @@ private:
                  : type == PointerType::Stack  ? "stack"
                  : type == PointerType::Static ? "static"
                                                : "unknown",
-                 current_region_ ? current_region_->mapping_name : "unknown",
-                 addr, old_value, value);
+                 current_region.mapping_name, addr, old_value, value);
 
     quota.Increment(type);
     return true;
@@ -204,7 +217,7 @@ private:
   std::uniform_real_distribution<double> dist_;
   std::uniform_int_distribution<int> bit_dist_;
   std::unordered_map<uint64_t, ValueChange> changes_;
-  const MemoryRegion *current_region_{nullptr};
+  const MemoryRegion *current_region{nullptr};
 };
 
 } // namespace memory_tools

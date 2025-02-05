@@ -23,7 +23,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # Known issue with spdlog
-add_compile_options(-Wno-dangling-reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    add_compile_options(-Wno-dangling-reference)
+endif()
 
 # Install rules
 include(GNUInstallDirs)

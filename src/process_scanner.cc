@@ -14,11 +14,23 @@
 
 namespace memory_tools {
 
-ProcessScanner::ProcessScanner(pid_t target_pid)
+bool MemoryRegion::operator<(const MemoryRegion &other) const {
+  return start_addr < other.start_addr;
+}
+
+bool MemoryRegion::contains(uintptr_t addr) const {
+  return addr >= start_addr && addr < end_addr;
+}
+
+ProcessScanner::ProcessScanner(pid_t target_pid, size_t num_threads)
     : target_pid_(target_pid), is_attached_(false),
-      page_size_(static_cast<size_t>(getpagesize())) {
+      page_size_(static_cast<size_t>(getpagesize())),
+      num_threads_(num_threads) {
   if (target_pid_ <= 0) {
     throw std::invalid_argument("Invalid process ID");
+  }
+  if (num_threads == 0) {
+    throw ::std::invalid_argument("Invalid number of threads (0)");
   }
 }
 
@@ -286,16 +298,22 @@ bool ProcessScanner::RefreshMemoryMap() {
     }
   }
 
+  std::sort(target_regions_.begin(), target_regions_.end());
+
   return !scan_regions_.empty();
 }
 
 bool ProcessScanner::IsValidPointerTarget(uint64_t addr) const {
-  for (const auto &region : target_regions_) {
-    if (addr >= region.start_addr && addr < region.end_addr) {
-      return true;
-    }
-  }
-  return false;
+  // Do binary search on sorted target_regions_.
+  auto it =
+      std::upper_bound(target_regions_.begin(), target_regions_.end(), addr,
+                       [](uint64_t addr, const MemoryRegion &region) {
+                         return addr < region.start_addr;
+                       });
+  if (it == target_regions_.begin())
+    return false;
+  --it;
+  return addr >= it->start_addr && addr < it->end_addr;
 }
 
 bool ProcessScanner::IsLikelyPointer(uint64_t value) const {
@@ -368,70 +386,43 @@ void ProcessScanner::ScanForPointers(InjectionStrategy &strategy) {
 
   auto start_time = std::chrono::steady_clock::now();
   ResetStats();
+  strategy.PreRunner();
 
-  std::vector<uint8_t> buffer(page_size_);
+  // Divide regions among threads
+  std::vector<std::vector<const MemoryRegion *>> thread_regions(num_threads_);
+  for (size_t i = 0; i < scan_regions_.size(); i++) {
+    thread_regions[i % num_threads_].push_back(&scan_regions_[i]);
+  }
 
-  for (const auto &region : scan_regions_) {
-    uint64_t current_addr = region.start_addr;
-    last_scan_stats_.regions_scanned++;
+  // Create per-thread stats and syncrhonization
+  std::vector<ScanStats> thread_stats(num_threads_);
 
-    // Set current region for error injection
-    strategy.SetCurrentRegion(region);
-
-    while (current_addr < region.end_addr) {
-      size_t remaining = region.end_addr - current_addr;
-      size_t to_read = std::min(remaining, page_size_);
-
-      if (!ReadMemory(current_addr, buffer.data(), to_read)) {
-        last_scan_stats_.bytes_skipped += to_read;
-      } else {
-        bool write_back = false;
-        // Process the data looking for pointers
-        for (size_t offset = 0; offset + sizeof(uint64_t) <= to_read;
-             offset += sizeof(uint64_t)) {
-          uint64_t value;
-          std::memcpy(&value, buffer.data() + offset, sizeof(uint64_t));
-
-          bool modified = false;
-          if (IsLikelyPointer(value)) {
-            modified = strategy.HandlePointer(current_addr + offset, value,
-                                              region.is_writable);
-            if (modified) {
-              spdlog::info("Modified Pointer");
-            }
-            last_scan_stats_.pointers_found++;
-          } else {
-            modified = strategy.HandleNonPointer(current_addr + offset, value,
-                                                 region.is_writable);
-            if (modified) {
-              spdlog::info("Modified Data");
-            }
+  // Launch threads
+  std::vector<std::thread> threads;
+  for (size_t thread_id = 0; thread_id < num_threads_; ++thread_id) {
+    threads.emplace_back(
+        [this, thread_id, &thread_regions, &thread_stats, &strategy]() {
+          for (const MemoryRegion *region : thread_regions[thread_id]) {
+            ScanRegion(*region, strategy, thread_stats[thread_id]);
+            thread_stats[thread_id].regions_scanned++;
           }
-          if (modified) {
-            write_back = true;
-            std::memcpy(buffer.data() + offset, &value, sizeof(value));
-          }
-        }
+        });
+  }
 
-        last_scan_stats_.total_bytes_scanned += to_read;
-        last_scan_stats_.bytes_readable += to_read;
-        if (region.is_writable) {
-          last_scan_stats_.bytes_writable += to_read;
-        }
-        if (region.is_executable) {
-          last_scan_stats_.bytes_writable += to_read;
-        }
+  // Wait for all threads
+  for (auto &thread : threads) {
+    thread.join();
+  }
 
-        // If buffer was modified, then write it back to traced process.
-        if (write_back) {
-          spdlog::debug("Writeback set!");
-        }
-        if (write_back && region.is_writable) {
-          WriteMemory(current_addr, buffer.data(), to_read);
-        }
-      }
-      current_addr += to_read;
-    }
+  // Merge stats
+  for (const auto &stats : thread_stats) {
+    last_scan_stats_.total_bytes_scanned += stats.total_bytes_scanned;
+    last_scan_stats_.bytes_readable += stats.bytes_readable;
+    last_scan_stats_.bytes_writable += stats.bytes_writable;
+    last_scan_stats_.bytes_executable += stats.bytes_executable;
+    last_scan_stats_.bytes_skipped += stats.bytes_skipped;
+    last_scan_stats_.pointers_found += stats.pointers_found;
+    last_scan_stats_.regions_scanned += stats.regions_scanned;
   }
 
   strategy.PostRunner();
@@ -441,6 +432,59 @@ void ProcessScanner::ScanForPointers(InjectionStrategy &strategy) {
       std::chrono::duration_cast<std::chrono::milliseconds>(end_time -
                                                             start_time)
           .count();
+}
+
+void ProcessScanner::ScanRegion(const MemoryRegion &region,
+                                InjectionStrategy &strategy,
+                                ScanStats &local_stats) {
+  std::vector<uint8_t> buffer(page_size_);
+  uint64_t current_addr = region.start_addr;
+
+  while (current_addr < region.end_addr) {
+    size_t remaining = region.end_addr - current_addr;
+    size_t to_read = std::min(remaining, page_size_);
+
+    if (!ReadMemory(current_addr, buffer.data(), to_read)) {
+      local_stats.bytes_skipped += to_read;
+    } else {
+      bool write_back = false;
+
+      for (size_t offset = 0; offset + sizeof(uint64_t) <= to_read;
+           offset += sizeof(uint64_t)) {
+        uint64_t value;
+        std::memcpy(&value, buffer.data() + offset, sizeof(uint64_t));
+
+        bool modified = false;
+        if (IsLikelyPointer(value)) {
+          modified = strategy.HandlePointer(current_addr + offset, value,
+                                            region.is_writable, region);
+          local_stats.pointers_found++;
+        } else {
+          modified = strategy.HandleNonPointer(current_addr + offset, value,
+                                               region.is_writable, region);
+        }
+
+        if (modified) {
+          write_back = true;
+          std::memcpy(buffer.data() + offset, &value, sizeof(value));
+        }
+      }
+
+      local_stats.total_bytes_scanned += to_read;
+      local_stats.bytes_readable += to_read;
+      if (region.is_writable) {
+        local_stats.bytes_writable += to_read;
+      }
+      if (region.is_executable) {
+        local_stats.bytes_executable += to_read;
+      }
+
+      if (write_back && region.is_writable) {
+        WriteMemory(current_addr, buffer.data(), to_read);
+      }
+    }
+    current_addr += to_read;
+  }
 }
 
 } // namespace memory_tools

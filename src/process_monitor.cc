@@ -31,6 +31,7 @@ void setup_signal_handlers() {
 
 struct CommonOptions {
   bool verbose{false};
+  size_t num_threads;
   std::string log_file;
   std::string program_name;
   std::vector<std::string> program_args;
@@ -97,7 +98,7 @@ bool monitor_process_core(pid_t child_pid, MonitoringStrategy &strategy,
       options.error_type, options.pointer_error_rate,
       options.non_pointer_error_rate, options.error_limit, options.error_seed);
   try {
-    memory_tools::ProcessScanner scanner(child_pid);
+    memory_tools::ProcessScanner scanner(child_pid, options.num_threads);
     strategy.before_monitoring();
 
     // Open log file for scan results
@@ -199,6 +200,9 @@ void add_common_options(CLI::App *app, Options &options) {
                 "Enable verbose console output");
   app->add_option("-l,--log-file", options.log_file, "Log file path")
       ->default_val("memory_scanner.log");
+  app->add_option("--threads", options.num_threads, "Number of scanner threads")
+      ->default_val(12)
+      ->check(CLI::Range(1, 256));
 
   app->add_option("--log-level", options.log_level,
                   "Log level (trace, debug, info, warn, error, critical)")
