@@ -1,6 +1,7 @@
 #ifndef __PROCESS_SCANNER_HH__
 #define __PROCESS_SCANNER_HH__
 
+#include "process_base.hh"
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -82,21 +83,12 @@ struct ScanStats {
   }
 };
 
-class ProcessScanner {
+class ProcessScanner : public ProcessBase {
 public:
-  ProcessScanner(ProcessScanner &&) = delete;
-  ProcessScanner &operator=(ProcessScanner &&) = delete;
-  explicit ProcessScanner(pid_t target_pid, size_t num_threads = 4);
-  ~ProcessScanner();
+  ProcessScanner(pid_t target_pid, size_t num_threads = 4);
 
-  // Prevent copying and assignment
-  ProcessScanner(const ProcessScanner &) = delete;
-  ProcessScanner &operator=(const ProcessScanner &) = delete;
-
-  // Core functionality
-  bool Attach();
-  bool Detach();
-  void ScanForPointers(InjectionStrategy &);
+  // Core Scanning functionality
+  void ScanForPointers(InjectionStrategy& strategy);
 
   // Statistics
   const ScanStats &GetLastScanStats() const { return last_scan_stats_; }

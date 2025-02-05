@@ -1,7 +1,9 @@
 #include "pagerank.hh"
 #include <chrono>
 #include <iostream>
+#include <iomanip>
 #include <random>
+
 void print_usage(const char *program_name) {
   std::cerr << "Usage: " << program_name << " <random_seed>\n";
   std::cerr << "  random_seed: Unsigned integer for RNG initialization\n";
