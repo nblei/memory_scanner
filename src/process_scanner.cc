@@ -1,15 +1,11 @@
 #include "process_scanner.hh"
-#include "spdlog/spdlog.h"
 #include <chrono>
 #include <cstring>
-#include <errno.h>
-#include <fstream>
-#include <iostream>
-#include <sstream>
 #include <sys/ptrace.h>
 #include <sys/uio.h>
 #include <sys/user.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 namespace memory_tools {
@@ -61,7 +57,7 @@ ProcessScanner::ProcessScanner(pid_t target_pid, size_t num_threads)
  * @note Scan statistics are stored in last_scan_stats_ member variable
  */
 void ProcessScanner::ScanForPointers(InjectionStrategy &strategy) {
-  if (!is_attached_) {
+  if (!IsAttached()) {
     throw std::runtime_error("Not attached to target process");
   }
 
@@ -75,8 +71,8 @@ void ProcessScanner::ScanForPointers(InjectionStrategy &strategy) {
 
   // Divide regions among threads
   std::vector<std::vector<const MemoryRegion *>> thread_regions(num_threads_);
-  for (size_t i = 0; i < scan_regions_.size(); i++) {
-    thread_regions[i % num_threads_].push_back(&scan_regions_[i]);
+  for (size_t i = 0; i < readable_regions_.size(); i++) {
+    thread_regions[i % num_threads_].push_back(&readable_regions_[i]);
   }
 
   // Create per-thread stats and syncrhonization
@@ -122,12 +118,12 @@ void ProcessScanner::ScanForPointers(InjectionStrategy &strategy) {
 void ProcessScanner::ScanRegion(const MemoryRegion &region,
                                 InjectionStrategy &strategy,
                                 ScanStats &local_stats) {
-  std::vector<uint8_t> buffer(page_size_);
+  std::vector<uint8_t> buffer(GetPageSize());
   uint64_t current_addr = region.start_addr;
 
   while (current_addr < region.end_addr) {
     size_t remaining = region.end_addr - current_addr;
-    size_t to_read = std::min(remaining, page_size_);
+    size_t to_read = std::min(remaining, GetPageSize());
 
     if (!ReadMemory(current_addr, buffer.data(), to_read)) {
       local_stats.bytes_skipped += to_read;

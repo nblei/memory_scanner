@@ -60,13 +60,13 @@ protected:
   // System information
   size_t GetPageSize() const { return page_size_; }
 
+  std::vector<MemoryRegion> readable_regions_; // Regions we can read from
+  std::vector<MemoryRegion> all_regions_;      // All memory regions
+
 private:
   pid_t target_pid_;
   bool is_attached_;
   size_t page_size_;
-
-  std::vector<MemoryRegion> readable_regions_; // Regions we can read from
-  std::vector<MemoryRegion> all_regions_;      // All memory regions
 };
 
 } // namespace memory_tools

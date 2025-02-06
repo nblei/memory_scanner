@@ -6,7 +6,6 @@
 #include <iomanip>
 #include <iostream>
 #include <sys/types.h>
-#include <vector>
 
 namespace memory_tools {
 
@@ -84,15 +83,6 @@ private:
   // For prallel processing
   void ScanRegion(const MemoryRegion &region, InjectionStrategy &strategy,
                   ScanStats &local_stats);
-
-  // Process state
-  pid_t target_pid_;
-  bool is_attached_;
-  size_t page_size_;
-
-  // Memory regions
-  std::vector<MemoryRegion> scan_regions_;   // Regions we should scan
-  std::vector<MemoryRegion> target_regions_; // Valid pointer targets
 
   size_t num_threads_;
 
