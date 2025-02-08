@@ -19,6 +19,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Werror
         -Wconversion
         -Wsign-conversion
+        -Wshadow
     )
 endif()
 
@@ -58,11 +59,15 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(spdlog cli11)
 
 add_executable(process_monitor
-    ./src/process_base.cc
-    ./src/process_scanner.cc
+    ./src/process_manager.cc
     ./src/monitor_interface.cc
-    ./src/process_checkpoint.cc
     ./src/process_monitor.cc
+    ./src/attach_guard.cc
+    ./src/cli.cc
+    ./src/monitoring_strategy.cc
+    ./src/command_monitoring_strategy.cc
+    ./src/global_state.cc
+    ./src/command_handler.cc
 )
 
 target_link_libraries(process_monitor

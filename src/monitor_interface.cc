@@ -1,14 +1,13 @@
 #include "monitor_interface.hh"
 
+#include "spdlog/spdlog.h"
 #include <atomic>
 #include <cstring>
 #include <system_error>
 
 namespace memory_tools {
 
-// Global command storage
-volatile CommandInfo g_pending_command{MonitorCommand::NoOp, 0, 0};
-
+namespace {
 // For synchronization between signal handler and main thread
 static std::atomic<bool> g_response_received{false};
 
@@ -16,6 +15,8 @@ static void MonitorResponseHandler(int /*signo*/, siginfo_t * /*info*/,
                                    void * /*context */) {
   g_response_received.store(true, std::memory_order_release);
 }
+
+} // namespace
 
 void InitTracedProcess() {
   // Set up signal handler for monitor responses
@@ -32,16 +33,29 @@ void InitTracedProcess() {
 
 bool SendCommand(MonitorCommand cmd, uint64_t param1, uint64_t param2) {
   // Store command info where monitor can access it
-  g_pending_command.cmd = cmd;
-  g_pending_command.param1 = param1;
-  g_pending_command.param2 = param2;
-
-  // Reset response flag
   g_response_received.store(false, std::memory_order_release);
+  const pid_t parent_pid = getppid();
+  spdlog::info("Sending command {} to parent pid {}", static_cast<int>(cmd),
+               parent_pid);
 
-  // Signal monitor
-  if (kill(getppid(), MONITOR_REQUEST_SIGNAL) < 0) {
+  // Send signal with data to parent process
+  CommandInfo info{cmd, param1, param2};
+  if (sigqueue(parent_pid, MONITOR_REQUEST_SIGNAL, info.Pack()) < 0) {
+    spdlog::error("Failed to send command signal: {}", strerror(errno));
     return false;
+  }
+  spdlog::info("Successfully sent command signal");
+
+  // Wait for response with timeout
+  constexpr auto TIMEOUT = std::chrono::seconds(5);
+  auto start = std::chrono::steady_clock::now();
+
+  while (!g_response_received.load(std::memory_order_acquire)) {
+    if (std::chrono::steady_clock::now() - start > TIMEOUT) {
+      spdlog::error("Timeout waiting for monitor response");
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
   return true;

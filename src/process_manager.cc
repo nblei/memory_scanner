@@ -1,4 +1,5 @@
-#include "process_base.hh"
+#include "process_manager.hh"
+#include "injection_strategy.hh"
 #include "spdlog/spdlog.h"
 #include <algorithm>
 #include <cstring>
@@ -21,7 +22,7 @@ bool MemoryRegion::contains(uintptr_t addr) const {
   return addr >= start_addr && addr < end_addr;
 }
 
-ProcessBase::ProcessBase(pid_t target_pid)
+ProcessManager::ProcessManager(pid_t target_pid)
     : target_pid_(target_pid), is_attached_(false),
       page_size_(static_cast<size_t>(getpagesize())) {
   if (target_pid_ <= 0) {
@@ -29,13 +30,13 @@ ProcessBase::ProcessBase(pid_t target_pid)
   }
 }
 
-ProcessBase::~ProcessBase() {
+ProcessManager::~ProcessManager() {
   if (is_attached_) {
     Detach();
   }
 }
 
-bool ProcessBase::Attach() {
+bool ProcessManager::Attach() {
   if (is_attached_) {
     return true; // Already attached
   }
@@ -86,7 +87,7 @@ bool ProcessBase::Attach() {
   return RefreshMemoryMap();
 }
 
-bool ProcessBase::Detach() {
+bool ProcessManager::Detach() {
   if (!is_attached_) {
     return true; // Already detached
   }
@@ -101,7 +102,8 @@ bool ProcessBase::Detach() {
   return true;
 }
 
-bool ProcessBase::ReadMemory(uint64_t addr, void *buffer, size_t size) const {
+bool ProcessManager::ReadMemory(uint64_t addr, void *buffer,
+                                size_t size) const {
   if (!is_attached_) {
     return false;
   }
@@ -150,8 +152,8 @@ bool ProcessBase::ReadMemory(uint64_t addr, void *buffer, size_t size) const {
  * @note This function requires the process to be attached and the target
  *       memory region to be writable
  */
-bool ProcessBase::WriteMemory(uint64_t addr, const void *buffer,
-                              size_t size) const {
+bool ProcessManager::WriteMemory(uint64_t addr, const void *buffer,
+                                 size_t size) const {
   if (!is_attached_) {
     return false;
   }
@@ -221,7 +223,7 @@ bool ProcessBase::WriteMemory(uint64_t addr, const void *buffer,
   return true;
 }
 
-bool ProcessBase::RefreshMemoryMap() {
+bool ProcessManager::RefreshMemoryMap() {
   std::string maps_path = "/proc/" + std::to_string(target_pid_) + "/maps";
   std::ifstream maps(maps_path);
   if (!maps) {
@@ -290,11 +292,11 @@ bool ProcessBase::RefreshMemoryMap() {
   return !all_regions_.empty();
 }
 
-bool ProcessBase::IsValidPointerTarget(uint64_t addr) const {
+bool ProcessManager::IsValidPointerTarget(uint64_t addr) const {
   // Do binary search on sorted target_regions_.
   auto it = std::upper_bound(all_regions_.begin(), all_regions_.end(), addr,
-                             [](uint64_t addr, const MemoryRegion &region) {
-                               return addr < region.start_addr;
+                             [](uint64_t addr_, const MemoryRegion &region) {
+                               return addr_ < region.start_addr;
                              });
   if (it == all_regions_.begin())
     return false;
@@ -302,7 +304,7 @@ bool ProcessBase::IsValidPointerTarget(uint64_t addr) const {
   return addr >= it->start_addr && addr < it->end_addr;
 }
 
-bool ProcessBase::IsLikelyPointer(uint64_t value) const {
+bool ProcessManager::IsLikelyPointer(uint64_t value) const {
   // Quick checks first
   if (value == 0) {
     return false; // Null pointer
@@ -320,6 +322,226 @@ bool ProcessBase::IsLikelyPointer(uint64_t value) const {
   }
 
   return IsValidPointerTarget(value);
+}
+
+bool ProcessManager::CreateCheckpoint() {
+  if (!IsAttached()) {
+    spdlog::error("Unable to create checkpoint --- ptrace not attached");
+    return false;
+  }
+
+  if (!RefreshMemoryMap()) {
+    spdlog::error("Unable to RefreshMemoryMap");
+    return false;
+  }
+
+  checkpoint_data_.clear();
+  checkpoint_regions_ = readable_regions_;
+
+  // Store each writable region
+  for (const auto &region : checkpoint_regions_) {
+    if (!region.is_writable) {
+      spdlog::warn("Skipping non-writable region in CreateCheckpoint");
+      continue;
+    }
+
+    MemoryChunk chunk;
+    chunk.addr = region.start_addr;
+    chunk.data.resize(region.end_addr - region.start_addr);
+
+    if (!ReadMemory(chunk.addr, chunk.data.data(), chunk.data.size())) {
+      ClearCheckpoint();
+      spdlog::error("Unable to read target process memory");
+      return false;
+    }
+
+    checkpoint_data_.push_back(std::move(chunk));
+  }
+
+  return true;
+}
+
+bool ProcessManager::RestoreCheckpoint() {
+  if (IsAttached()) {
+    spdlog::error("Unable to restore checkpoint --- process not attached");
+    return false;
+  }
+  if (checkpoint_data_.empty()) {
+    spdlog::error("Unable to restore checkpoint --- no checkpoint exists");
+    return false;
+  }
+
+  // Verify regions still match
+  auto current_regions = readable_regions_;
+  if (!std::equal(checkpoint_regions_.begin(), checkpoint_regions_.end(),
+                  current_regions.begin(), current_regions.end(),
+                  [](const MemoryRegion &a, const MemoryRegion &b) {
+                    return a.start_addr == b.start_addr &&
+                           a.end_addr == b.end_addr &&
+                           a.is_writable == b.is_writable;
+                  })) {
+    return false;
+  }
+
+  // Restore each saved region
+  for (const auto &chunk : checkpoint_data_) {
+    if (!WriteMemory(chunk.addr, chunk.data.data(), chunk.data.size())) {
+      spdlog::error(
+          "Unable to write-back checkpoint to traced process' memory");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void ProcessManager::ClearCheckpoint() {
+  checkpoint_data_.clear();
+  checkpoint_regions_.clear();
+}
+
+std::optional<ScanStats>
+ProcessManager::ScanForPointers(InjectionStrategy &strategy,
+                                size_t num_threads_) {
+  if (!IsAttached()) {
+    throw std::runtime_error("Not attached to target process");
+  }
+
+  if (!strategy.PreRunner()) {
+    return {};
+  }
+
+  auto start_time = std::chrono::steady_clock::now();
+  ScanStats stats;
+  strategy.PreRunner();
+
+  // Divide regions among threads
+  const auto &regions = readable_regions_;
+  std::vector<std::vector<const MemoryRegion *>> thread_regions(num_threads_);
+  for (size_t i = 0; i < regions.size(); i++) {
+    thread_regions[i % num_threads_].push_back(&regions[i]);
+  }
+
+  // Create per-thread stats and syncrhonization
+  std::vector<ScanStats> thread_stats(num_threads_);
+
+  // Launch threads
+  std::vector<std::thread> threads;
+  for (size_t thread_id = 0; thread_id < num_threads_; ++thread_id) {
+    threads.emplace_back(
+        [this, thread_id, &thread_regions, &thread_stats, &strategy]() {
+          for (const MemoryRegion *region : thread_regions[thread_id]) {
+            ScanRegion(*region, strategy, thread_stats[thread_id]);
+            thread_stats[thread_id].regions_scanned++;
+          }
+        });
+  }
+
+  // Wait for all threads
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  // Merge stats
+  for (const auto &thread_stat : thread_stats) {
+    stats.total_bytes_scanned += thread_stat.total_bytes_scanned;
+    stats.bytes_readable += thread_stat.bytes_readable;
+    stats.bytes_writable += thread_stat.bytes_writable;
+    stats.bytes_executable += thread_stat.bytes_executable;
+    stats.bytes_skipped += thread_stat.bytes_skipped;
+    stats.pointers_found += thread_stat.pointers_found;
+    stats.regions_scanned += thread_stat.regions_scanned;
+  }
+
+  strategy.PostRunner();
+
+  auto end_time = std::chrono::steady_clock::now();
+  stats.scan_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           end_time - start_time)
+                           .count();
+  return stats;
+}
+
+void ProcessManager::ScanRegion(const MemoryRegion &region,
+                                InjectionStrategy &strategy,
+                                ScanStats &local_stats) {
+  std::vector<uint8_t> buffer(page_size_);
+  uint64_t current_addr = region.start_addr;
+
+  while (current_addr < region.end_addr) {
+    size_t remaining = region.end_addr - current_addr;
+    size_t to_read = std::min(remaining, page_size_);
+
+    if (ReadMemory(current_addr, buffer.data(), to_read)) {
+      local_stats.bytes_skipped += to_read;
+    } else {
+      bool write_back = false;
+
+      for (size_t offset = 0; offset + sizeof(uint64_t) <= to_read;
+           offset += sizeof(uint64_t)) {
+        uint64_t value;
+        std::memcpy(&value, buffer.data() + offset, sizeof(uint64_t));
+
+        bool modified = false;
+        if (IsLikelyPointer(value)) {
+          modified = strategy.HandlePointer(current_addr + offset, value,
+                                            region.is_writable, region);
+          local_stats.pointers_found++;
+        } else {
+          modified = strategy.HandleNonPointer(current_addr + offset, value,
+                                               region.is_writable, region);
+        }
+
+        if (modified) {
+          write_back = true;
+          std::memcpy(buffer.data() + offset, &value, sizeof(value));
+        }
+      }
+
+      local_stats.total_bytes_scanned += to_read;
+      local_stats.bytes_readable += to_read;
+      if (region.is_writable) {
+        local_stats.bytes_writable += to_read;
+      }
+      if (region.is_executable) {
+        local_stats.bytes_executable += to_read;
+      }
+
+      if (write_back && region.is_writable) {
+        WriteMemory(current_addr, buffer.data(), to_read);
+      }
+    }
+    current_addr += to_read;
+  }
+}
+
+std::ostream &operator<<(std::ostream &os, const ScanStats &stats) {
+  double percent =
+      100. * (sizeof(uintptr_t) * static_cast<double>(stats.pointers_found)) /
+      static_cast<double>(stats.bytes_readable - stats.bytes_executable);
+  os << "Scan Statistics:\n"
+     << std::dec << "  Regions scanned:         " << stats.regions_scanned
+     << "\n"
+     << "  Total bytes scanned:     " << stats.total_bytes_scanned << " ("
+     << (static_cast<double>(stats.total_bytes_scanned) / (1024.0 * 1024.0))
+     << " MB)\n"
+     << "  Readable bytes:          " << stats.bytes_readable << " ("
+     << (static_cast<double>(stats.bytes_readable) / (1024.0 * 1024.0))
+     << " MB)\n"
+     << "  Writable bytes:          " << stats.bytes_writable << " ("
+     << (static_cast<double>(stats.bytes_writable) / (1024.0 * 1024.0))
+     << " MB)\n"
+     << "  Executable bytes:        " << stats.bytes_executable << " ("
+     << (static_cast<double>(stats.bytes_executable) / (1024.0 * 1024.0))
+     << " MB)\n"
+     << "  Bytes skipped:           " << stats.bytes_skipped << " ("
+     << (static_cast<double>(stats.bytes_skipped) / (1024.0 * 1024.0))
+     << " MB)\n"
+     << "  Pointers found:          " << stats.pointers_found << "\n"
+     << "  Pointers as % of memory: " << std::setprecision(2) << percent
+     << "%\n"
+     << "  Scan time:               " << stats.scan_time_ms << " ms";
+  return os;
 }
 
 } // namespace memory_tools

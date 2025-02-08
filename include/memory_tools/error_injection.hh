@@ -2,19 +2,15 @@
 #ifndef __ERROR_INJECTION_HH__
 #define __ERROR_INJECTION_HH__
 
-#include "process_scanner.hh"
+#include "cli.hh"
+#include "injection_strategy.hh"
+#include "process_manager.hh"
 #include "spdlog/spdlog.h"
 #include <chrono>
 #include <random>
 #include <shared_mutex>
 
 namespace memory_tools {
-
-enum class ErrorType {
-  BitFlip, // Flip random bits
-  StuckAtZero,
-  StuckAtOne,
-};
 
 enum class PointerType {
   Heap,   // [heap] region
@@ -110,6 +106,10 @@ public:
         dist_(0.0, 1.0), bit_dist_(0, sizeof(uintptr_t) * g_bits_per_byte - 1) {
     quota_.wildcard_quota = error_limit;
   }
+  ErrorInjectionStrategy(const CommonOptions &opts)
+      : ErrorInjectionStrategy(opts.error_type, opts.pointer_error_rate,
+                               opts.non_pointer_error_rate, opts.error_limit,
+                               opts.error_seed) {}
 
   // For monitoring results
   const std::unordered_map<uint64_t, ValueChange> &get_changes() const {
@@ -123,30 +123,31 @@ public:
   bool PreRunner() override { return true; }
 
   bool HandlePointer(uint64_t addr, uint64_t &value, bool writable,
-                     const MemoryRegion &current_region) override {
+                     const MemoryRegion &current_region_) override {
     return inject_error(pointer_error_rate_, quota_, addr, value, writable,
-                        current_region);
+                        current_region_);
   }
 
   bool HandleNonPointer(uint64_t addr, uint64_t &value, bool writable,
-                        const MemoryRegion &current_region) override {
+                        const MemoryRegion &current_region_) override {
     return inject_error(non_pointer_error_rate_, quota_, addr, value, writable,
-                        current_region);
+                        current_region_);
   }
 
   bool PostRunner() override { return true; }
 
 private:
-  PointerType determine_pointer_type(const MemoryRegion &current_region) const {
-    if (current_region.mapping_name.empty()) {
+  PointerType
+  determine_pointer_type(const MemoryRegion &current_region_) const {
+    if (current_region_.mapping_name.empty()) {
       spdlog::debug("No region or empty mapping name");
       return PointerType::Unknown;
     }
 
-    if (current_region.mapping_name.find("[heap]") != std::string::npos) {
+    if (current_region_.mapping_name.find("[heap]") != std::string::npos) {
       return PointerType::Heap;
     }
-    if (current_region.mapping_name.find("[stack]") != std::string::npos) {
+    if (current_region_.mapping_name.find("[stack]") != std::string::npos) {
       return PointerType::Stack;
     }
     return PointerType::Static;
@@ -154,8 +155,8 @@ private:
 
   bool inject_error(double rate, RegionQuota &quota, uint64_t addr,
                     uint64_t &value, bool writable,
-                    const MemoryRegion &current_region) {
-    auto type = determine_pointer_type(current_region);
+                    const MemoryRegion &current_region_) {
+    auto type = determine_pointer_type(current_region_);
     if (!writable || dist_(rng_) > rate || !quota.Available(type)) {
       return false;
     }
@@ -177,7 +178,7 @@ private:
         old_value,
         value,
         type,
-        current_region.mapping_name,
+        current_region_.mapping_name,
         std::chrono::steady_clock::now(),
     };
     spdlog::info("Injected {} error in {} region at {:#x}: {:#x} -> {:#x}",
@@ -185,7 +186,7 @@ private:
                  : type == PointerType::Stack  ? "stack"
                  : type == PointerType::Static ? "static"
                                                : "unknown",
-                 current_region.mapping_name, addr, old_value, value);
+                 current_region_.mapping_name, addr, old_value, value);
 
     quota.Increment(type);
     return true;
