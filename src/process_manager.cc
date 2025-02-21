@@ -344,7 +344,7 @@ bool ProcessManager::CreateCheckpoint() {
   }
 
   // Create (if needed) directory, allocate file descriptor
-  if (mkdir(checkpoint_dir.c_str(), 0700) < 0 && errno != EEXIST) {
+  if (mkdir(checkpoint_dir.c_str(), 0777) < 0 && errno != EEXIST) {
     spdlog::error("Failed to create checkpoint directory: {}", strerror(errno));
     goto cond_reattach;
   }
@@ -359,6 +359,8 @@ bool ProcessManager::CreateCheckpoint() {
     goto close_fd;
   }
 
+  criu_set_work_dir_fd(dir_fd);
+
   // Set basic options
   criu_set_pid(target_pid_);
   criu_set_shell_job(true);     // Handle process groups
@@ -366,15 +368,16 @@ bool ProcessManager::CreateCheckpoint() {
 
   // Log Options
   criu_set_log_level(4);
-  criu_set_log_file(std::format("{}/criu.log", checkpoint_dir).c_str());
+  criu_set_log_file(std::format("criu_log_{}.txt", target_pid_).c_str());
 
-  // Memory options
-  criu_set_track_mem(false); // Useful for incremental checkpointing
-
-  // Auto-dedup memory pages
-  criu_set_auto_dedup(false); // We want to preseve exact memory pages
-
+  criu_set_track_mem(false);       // No need for incremental checkpointing
+  criu_set_auto_dedup(false);      // We want to preseve exact memory pages
+  criu_set_ext_unix_sk(false);     // Don't try to checkpoint unix sockets
+  criu_set_file_locks(false);      // Don't try to checkpoint file locks
+  criu_set_tcp_established(false); // Don't try to checkpoint TCP connections
   criu_set_images_dir_fd(dir_fd);
+  criu_set_ghost_limit(0);     // Disable ghost file support
+  criu_set_force_irmap(false); // Don't force inode remap
 
   if (int ret = criu_dump(); ret != 0) {
     spdlog::error("CRIU dump failed: {}", strerror(-ret));

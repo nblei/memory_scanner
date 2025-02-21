@@ -56,13 +56,6 @@ FetchContent_Declare(
     GIT_TAG v2.3.2
 )
 
-# Declare CRIU source
-FetchContent_Declare(
-    criu
-    GIT_REPOSITORY https://github.com/checkpoint-restore/criu.git
-    GIT_TAG v3.19  # Choose a stable version
-)
-
 add_custom_target(criu_build
     COMMAND make
     WORKING_DIRECTORY ${criu_SOURCE_DIR}

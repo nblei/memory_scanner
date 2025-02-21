@@ -10,6 +10,7 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
+#include <sys/capability.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -92,6 +93,7 @@ int main(int argc, char *argv[]) {
 
   if (child_pid == 0) {
     // Child process
+
     std::vector<char *> exec_args;
 
     // Convert all program arguments to char* for execvp
