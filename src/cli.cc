@@ -95,8 +95,7 @@ void AddCommonOptions(CLI::App *app, CommonOptions &options) {
       ->required();
 }
 
-CliSubcommands CreateCli(CLI::App &app, RunOnceOptions &once_opts,
-                         RunPeriodicOptions &periodic_opts,
+CliSubcommands CreateCli(CLI::App &app, RunPeriodicOptions &periodic_opts,
                          RunCommandOptions &cmd_opts) {
   // Main program setup
   app.require_subcommand(1, 1);
@@ -108,17 +107,15 @@ CliSubcommands CreateCli(CLI::App &app, RunOnceOptions &once_opts,
       "command",
       "Run in command mode - monitor responds to signals from traced process");
 
-  AddCommonOptions(run_once, once_opts);
-  run_once
-      ->add_option("-d,--delay", once_opts.delay_ms,
-                   "Delay before scanning (milliseconds)")
-      ->default_val(1000)
-      ->check(CLI::PositiveNumber);
-
   AddCommonOptions(run_periodic, periodic_opts);
   run_periodic
       ->add_option("-i,--interval", periodic_opts.interval_ms,
                    "Scan interval in milliseconds")
+      ->default_val(1000)
+      ->check(CLI::PositiveNumber);
+  run_periodic
+      ->add_option("-d,--delay", periodic_opts.initial_delay_ms,
+                   "Initial delay before first scan in milliseconds")
       ->default_val(1000)
       ->check(CLI::PositiveNumber);
 

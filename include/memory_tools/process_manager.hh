@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <sys/types.h>
+#include <sys/user.h>
 #include <vector>
 
 namespace memory_tools {
@@ -65,28 +66,26 @@ public:
   // Checkpoint Functionality
   bool CreateCheckpoint();
   bool RestoreCheckpoint();
-  void ClearCheckpoint();
 
 private:
   struct MemoryChunk {
     uint64_t addr;
     std::vector<uint8_t> data;
+    size_t size() const { return data.size(); }
   };
+
   // Pointer validation helpers
   bool IsValidPointerTarget(uint64_t addr) const;
   bool IsLikelyPointer(uint64_t value) const;
   void ScanRegion(const MemoryRegion &region, InjectionStrategy &strategy,
                   ScanStats &stats);
+  std::string CheckpointDir() const;
 
   pid_t target_pid_;
   bool is_attached_;
   size_t page_size_;
   std::vector<MemoryRegion> readable_regions_; // Regions we can read from
   std::vector<MemoryRegion> all_regions_;      // All memory regions
-
-  // Checkpoint data
-  std::vector<MemoryChunk> checkpoint_data_;
-  std::vector<MemoryRegion> checkpoint_regions_; // Regions we can read from
 };
 
 } // namespace memory_tools

@@ -14,11 +14,11 @@ void HandleCommandSignal(int /* signo */, siginfo_t *info,
                          void * /* context */) {
   // spdlog::info("Received command signal");
   const char *msg = "HandleCommandSignal entered\n";
-  write(STDERR_FILENO, msg, strlen(msg));
+  (void)!write(STDERR_FILENO, msg, strlen(msg));
   if (!info->si_ptr) {
     // spdlog::error("Recieved signal with null data");
     const char *err = "Received signal with null data\n";
-    write(STDERR_FILENO, err, strlen(err));
+    (void)!write(STDERR_FILENO, err, strlen(err));
     return;
   }
   g_last_cmd_data.store(info->si_value.sival_ptr);
@@ -29,7 +29,7 @@ void HandleCommandSignal(int /* signo */, siginfo_t *info,
 void HandleCommandSignal(CommandInfo &info) {
   // spdlog::info("Received command signal");
   const char *err = "Received signal with null data\n";
-  write(STDERR_FILENO, err, strlen(err));
+  (void)!write(STDERR_FILENO, err, strlen(err));
   g_last_cmd_data.store(reinterpret_cast<void *>(info.Pack().sival_ptr));
   g_command_pending.store(true, std::memory_order_release);
   // spdlog::info("Stored command data");

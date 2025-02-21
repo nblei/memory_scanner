@@ -2,12 +2,15 @@
 #include "injection_strategy.hh"
 #include "spdlog/spdlog.h"
 #include <algorithm>
+#include <criu/criu.h>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <sys/ptrace.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -40,6 +43,7 @@ bool ProcessManager::Attach() {
   if (is_attached_) {
     return true; // Already attached
   }
+  spdlog::info("Attaching Process");
 
   if (ptrace(PTRACE_ATTACH, target_pid_, nullptr, nullptr) == -1) {
     std::cerr << "Failed to attach to process " << target_pid_ << ": "
@@ -92,6 +96,7 @@ bool ProcessManager::Detach() {
     return true; // Already detached
   }
 
+  spdlog::info("Detaching process");
   if (ptrace(PTRACE_DETACH, target_pid_, nullptr, nullptr) == -1) {
     std::cerr << "Failed to detach from process " << target_pid_ << ": "
               << strerror(errno) << std::endl;
@@ -325,79 +330,121 @@ bool ProcessManager::IsLikelyPointer(uint64_t value) const {
 }
 
 bool ProcessManager::CreateCheckpoint() {
-  if (!IsAttached()) {
-    spdlog::error("Unable to create checkpoint --- ptrace not attached");
-    return false;
-  }
+  bool attached = IsAttached();
+  bool retval = false;
+  // Set directory for checkpoint files
+  std::string checkpoint_dir = CheckpointDir();
+  int dir_fd;
 
-  if (!RefreshMemoryMap()) {
-    spdlog::error("Unable to RefreshMemoryMap");
-    return false;
-  }
-
-  checkpoint_data_.clear();
-  checkpoint_regions_ = readable_regions_;
-
-  // Store each writable region
-  for (const auto &region : checkpoint_regions_) {
-    if (!region.is_writable) {
-      spdlog::warn("Skipping non-writable region in CreateCheckpoint");
-      continue;
+  if (attached) {
+    if (!Detach()) {
+      spdlog::error("Failed to detach from process before checkpoint");
+      goto done;
     }
-
-    MemoryChunk chunk;
-    chunk.addr = region.start_addr;
-    chunk.data.resize(region.end_addr - region.start_addr);
-
-    if (!ReadMemory(chunk.addr, chunk.data.data(), chunk.data.size())) {
-      ClearCheckpoint();
-      spdlog::error("Unable to read target process memory");
-      return false;
-    }
-
-    checkpoint_data_.push_back(std::move(chunk));
   }
 
-  return true;
+  // Create (if needed) directory, allocate file descriptor
+  if (mkdir(checkpoint_dir.c_str(), 0700) < 0 && errno != EEXIST) {
+    spdlog::error("Failed to create checkpoint directory: {}", strerror(errno));
+    goto cond_reattach;
+  }
+  dir_fd = open(checkpoint_dir.c_str(), O_DIRECTORY);
+  if (dir_fd < 0) {
+    spdlog::error("Failed to open checkpoint directory: {}", strerror(errno));
+    goto cond_reattach;
+  }
+
+  if (int ret = criu_init_opts(); ret < 0) {
+    spdlog::error("Failed to initialize CRIU options");
+    goto close_fd;
+  }
+
+  // Set basic options
+  criu_set_pid(target_pid_);
+  criu_set_shell_job(true);     // Handle process groups
+  criu_set_leave_running(true); // Don't kill after checkpoint
+
+  // Log Options
+  criu_set_log_level(4);
+  criu_set_log_file(std::format("{}/criu.log", checkpoint_dir).c_str());
+
+  // Memory options
+  criu_set_track_mem(false); // Useful for incremental checkpointing
+
+  // Auto-dedup memory pages
+  criu_set_auto_dedup(false); // We want to preseve exact memory pages
+
+  criu_set_images_dir_fd(dir_fd);
+
+  if (int ret = criu_dump(); ret != 0) {
+    spdlog::error("CRIU dump failed: {}", strerror(-ret));
+    goto cond_reattach;
+  }
+  retval = true;
+
+close_fd:
+  close(dir_fd);
+cond_reattach:
+  if (attached) {
+    if (!Attach()) {
+      spdlog::error("Failed to reattach process after checkpoint");
+    }
+  }
+done:
+  return retval;
+}
+
+std::string ProcessManager::CheckpointDir() const {
+  return fmt::format("/tmp/checkpoint_{}", target_pid_);
 }
 
 bool ProcessManager::RestoreCheckpoint() {
-  if (IsAttached()) {
-    spdlog::error("Unable to restore checkpoint --- process not attached");
-    return false;
-  }
-  if (checkpoint_data_.empty()) {
-    spdlog::error("Unable to restore checkpoint --- no checkpoint exists");
-    return false;
+  bool attached = IsAttached();
+  bool retval = false;
+  std::string checkpoint_dir = CheckpointDir();
+  int dir_fd;
+
+  if (access(checkpoint_dir.c_str(), F_OK) == -1) {
+    spdlog::error("Checkpoint directory does not exist");
+    goto done;
   }
 
-  // Verify regions still match
-  auto current_regions = readable_regions_;
-  if (!std::equal(checkpoint_regions_.begin(), checkpoint_regions_.end(),
-                  current_regions.begin(), current_regions.end(),
-                  [](const MemoryRegion &a, const MemoryRegion &b) {
-                    return a.start_addr == b.start_addr &&
-                           a.end_addr == b.end_addr &&
-                           a.is_writable == b.is_writable;
-                  })) {
-    return false;
-  }
-
-  // Restore each saved region
-  for (const auto &chunk : checkpoint_data_) {
-    if (!WriteMemory(chunk.addr, chunk.data.data(), chunk.data.size())) {
+  if (attached) {
+    if (!Detach()) {
       spdlog::error(
-          "Unable to write-back checkpoint to traced process' memory");
-      return false;
+          "Failed to detach from process before restoring checkpoint");
+      goto done;
     }
   }
 
-  return true;
-}
+  if (dir_fd = open(checkpoint_dir.c_str(), O_DIRECTORY); dir_fd < 0) {
+    spdlog::error("Failed to open checkpoint directory: {}", strerror(errno));
+    goto cond_reattach;
+  }
 
-void ProcessManager::ClearCheckpoint() {
-  checkpoint_data_.clear();
-  checkpoint_regions_.clear();
+  if (criu_init_opts() < 0) {
+    spdlog::error("Failed to initialize CRIU options");
+    goto close_fd;
+  }
+
+  criu_set_images_dir_fd(dir_fd);
+
+  if (int ret = criu_restore(); ret < 0) {
+    spdlog::error("CRIU restore failed: {}", strerror(-ret));
+    goto close_fd;
+  }
+
+  retval = true;
+close_fd:
+  close(dir_fd);
+cond_reattach:
+  if (attached) {
+    if (!Attach()) {
+      spdlog::error("Failed to reattach process after checkpoint restoration");
+    }
+  }
+done:
+  return retval;
 }
 
 std::optional<ScanStats>
@@ -472,7 +519,7 @@ void ProcessManager::ScanRegion(const MemoryRegion &region,
     size_t remaining = region.end_addr - current_addr;
     size_t to_read = std::min(remaining, page_size_);
 
-    if (ReadMemory(current_addr, buffer.data(), to_read)) {
+    if (!ReadMemory(current_addr, buffer.data(), to_read)) {
       local_stats.bytes_skipped += to_read;
     } else {
       bool write_back = false;

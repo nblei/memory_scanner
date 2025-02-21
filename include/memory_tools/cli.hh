@@ -27,12 +27,11 @@ struct CommonOptions {
   uint64_t error_seed{0};
   spdlog::level::level_enum log_level{spdlog::level::info};
 };
-struct RunOnceOptions : CommonOptions {
-  unsigned delay_ms{1000};
-};
 
 struct RunPeriodicOptions : CommonOptions {
+  unsigned initial_delay_ms{1000};
   unsigned interval_ms{1000};
+  std::optional<size_t> max_iterations{std::nullopt};
 };
 
 struct RunCommandOptions : CommonOptions {};
@@ -44,8 +43,7 @@ struct CliSubcommands {
 };
 
 void AddCommonOptions(CLI::App *app, CommonOptions &options);
-CliSubcommands CreateCli(CLI::App &app, RunOnceOptions &once_opts,
-                         RunPeriodicOptions &periodic_opts,
+CliSubcommands CreateCli(CLI::App &app, RunPeriodicOptions &periodic_opts,
                          RunCommandOptions &cmd_opts);
 void SetupLogging(const CommonOptions &options);
 

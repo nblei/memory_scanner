@@ -1,7 +1,7 @@
 #include "cli.hh"
 #include "command_handler.hh"
+#include "monitor_controller.hh"
 #include "monitor_interface.hh"
-#include "monitor_strategy.hh"
 #include <CLI/CLI.hpp>
 #include <cstring>
 #include <ctime>
@@ -62,11 +62,10 @@ void setup_signal_handlers() {
 int main(int argc, char *argv[]) {
   // Main program setup
   CLI::App app{"Process Monitor - analyzes process memory for pointers"};
-  RunOnceOptions once_opts;
   RunPeriodicOptions periodic_opts;
   RunCommandOptions cmd_opts;
 
-  auto subcmds = CreateCli(app, once_opts, periodic_opts, cmd_opts);
+  auto subcmds = CreateCli(app, periodic_opts, cmd_opts);
 
   try {
     app.parse(argc, argv);
@@ -74,11 +73,9 @@ int main(int argc, char *argv[]) {
     return app.exit(e);
   }
 
-  const bool is_once = subcmds.run_once->parsed();
   const bool is_periodic = subcmds.run_periodic->parsed();
   const bool is_cmd = subcmds.run_cmd->parsed();
-  CommonOptions &active_opts = is_once ? static_cast<CommonOptions &>(once_opts)
-                               : is_periodic
+  CommonOptions &active_opts = is_periodic
                                    ? static_cast<CommonOptions &>(periodic_opts)
                                    : static_cast<CommonOptions &>(cmd_opts);
 
@@ -109,23 +106,24 @@ int main(int argc, char *argv[]) {
     exit(1);
   }
 
+  MonitorMode mode;
+  MonitorConfig config;
+
   // Parent process
-  bool success;
-  if (is_once) {
-    OnceMonitoringStrategy strategy(once_opts.delay_ms, child_pid, once_opts);
-    success = strategy.MonitoringProcess();
-  } else if (is_periodic) {
-    PeriodicMonitoringStrategy strategy(periodic_opts.interval_ms, child_pid,
-                                        periodic_opts);
-    success = strategy.MonitoringProcess();
+  if (is_periodic) {
+    mode = MonitorMode::Periodic;
+    config.initial_delay =
+        std::chrono::milliseconds(periodic_opts.initial_delay_ms);
+    config.iteration_limit = periodic_opts.max_iterations;
+    config.interval = std::chrono::milliseconds(periodic_opts.interval_ms);
   } else if (is_cmd) {
-    CommandMonitoringStrategy strategy(child_pid, cmd_opts);
-    success = strategy.MonitoringProcess();
+    mode = MonitorMode::Command;
   } else {
-    success = false;
     exit(1);
   }
-  (void)success;
+
+  MonitorController controller(child_pid, active_opts, mode, config);
+  controller.StartMonitoring();
 
   // Cleanup
   spdlog::info("Killing child process");

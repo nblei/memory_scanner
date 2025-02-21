@@ -56,7 +56,25 @@ FetchContent_Declare(
     GIT_TAG v2.3.2
 )
 
+# Declare CRIU source
+FetchContent_Declare(
+    criu
+    GIT_REPOSITORY https://github.com/checkpoint-restore/criu.git
+    GIT_TAG v3.19  # Choose a stable version
+)
+
+add_custom_target(criu_build
+    COMMAND make
+    WORKING_DIRECTORY ${criu_SOURCE_DIR}
+    COMMENT "Building CRIU from source"
+)
+
 FetchContent_MakeAvailable(spdlog cli11)
+
+find_library(CRIU_LIBRARY criu)
+if(NOT CRIU_LIBRARY)
+    message(FATAL_ERROR "CRIU library not found")
+endif()
 
 add_executable(process_monitor
     ./src/process_manager.cc
@@ -64,21 +82,55 @@ add_executable(process_monitor
     ./src/process_monitor.cc
     ./src/attach_guard.cc
     ./src/cli.cc
-    ./src/monitoring_strategy.cc
-    ./src/command_monitoring_strategy.cc
     ./src/global_state.cc
     ./src/command_handler.cc
+    ./src/monitor_controller.cc
 )
 
 target_link_libraries(process_monitor
     PRIVATE
         CLI11::CLI11
         spdlog::spdlog
+        ${CRIU_LIBRARY}
 )
 
 target_include_directories(process_monitor
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/memory_tools>
+    PRIVATE
+        ${criu_SOURCE_DIR}/include
 )
 
 add_subdirectory(examples)
+
+# Find Doxygen
+find_package(Doxygen REQUIRED)
+
+# Check if Dot is installed
+if(NOT DOXYGEN_DOT_FOUND) 
+    message(WARNING "Graphviz/Dot not found - UML diagrams will not be generated")
+endif()
+
+# Configure Doxyfile
+set(DOXYGEN_GENERATE_HTML YES)
+set(DOXYGEN_GENERATE_XML YES)
+set(DOXYGEN_CLASS_DIAGRAMS YES)
+set(DOXYGEN_CLASS_GRAPH YES)
+set(DOXYGEN_COLLABORATION_GRAPH YES)
+set(DOXYGEN_INCLUDE_GRAPH YES)
+set(DOXYGEN_INCLUDED_BY_GRAPH YES)
+set(DOXYGEN_CALL_GRAPH YES)
+set(DOXYGEN_CALLER_GRAPH YES)
+set(DOXYGEN_EXTRACT_ALL YES)
+set(DOXYGEN_EXTRACT_PRIVATE YES)
+set(DOXYGEN_EXTRACT_STATIC YES)
+set(DOXYGEN_UML_LOOK YES)
+set(DOXYGEN_HAVE_DOT ${DOXYGEN_DOT_FOUND})
+set(DOXYGEN_DOT_GRAPH_MAX_NODES 100)
+
+# Setup doxygen target that creates documentation
+doxygen_add_docs(docs 
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include/memory_tools
+    COMMENT "Generating documentation with Doxygen"
+)
